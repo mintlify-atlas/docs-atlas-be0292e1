@@ -1,0 +1,293 @@
+---
+title: "ArgoCD Image Updater"
+description: "Automatic container image update for ArgoCD applications"
+---
+
+# ArgoCD Image Updater
+
+ArgoCD Image Updater is a tool to automatically update container image versions in ArgoCD applications. It monitors container registries for new image tags and updates the corresponding manifests in Git or directly in the cluster.
+
+## Purpose
+
+Image Updater enables automated deployments by:
+
+- **Monitoring registries** for new image versions (e.g., GitHub Container Registry)
+- **Updating applications** automatically when new images are pushed
+- **Integrating with GitOps** workflows to maintain declarative state
+- **Supporting multiple strategies** (semver, latest, regex patterns)
+
+This is particularly useful in development environments where applications are frequently updated.
+
+## Configuration
+
+From `nixidy/env/local/image-updater.nix`:
+
+```nix
+applications.image-updater = {
+  namespace = "argocd";
+  createNamespace = false;
+
+  helm.releases.argocd-image-updater = {
+    chart = charts.argoproj.argocd-image-updater;
+
+    values = {
+      config.registries = [
+        {
+          name = "GitHub Container Registry";
+          prefix = "ghcr.io";
+          api_url = "https://ghcr.io";
+          credentials = "secret:argocd/ghcr-credentials#token";
+        }
+      ];
+    };
+  };
+};
+```
+
+### Registry Configuration
+
+The image updater is configured to monitor GitHub Container Registry (ghcr.io):
+
+- **Name**: GitHub Container Registry
+- **Prefix**: `ghcr.io`
+- **API URL**: `https://ghcr.io`
+- **Credentials**: Stored in Kubernetes secret `ghcr-credentials` in the `argocd` namespace
+
+## Deployment
+
+Deployed via ArgoCD in the `argocd` namespace alongside the main ArgoCD controller.
+
+### Namespace
+
+```yaml
+namespace: argocd
+```
+
+### Helm Chart
+
+Uses the official ArgoCD Image Updater chart from the Argoproj repository:
+
+```yaml
+chart: charts.argoproj.argocd-image-updater
+```
+
+Chart version is pinned via `flake.lock` to ensure reproducibility.
+
+## Usage
+
+### Annotating Applications
+
+To enable automatic image updates for an ArgoCD application, add annotations to the Application manifest:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  annotations:
+    # Enable image updater
+    argocd-image-updater.argoproj.io/image-list: myapp=ghcr.io/org/my-app
+    
+    # Update strategy (semver, latest, digest, name, regex)
+    argocd-image-updater.argoproj.io/myapp.update-strategy: semver
+    
+    # Semver constraint (optional)
+    argocd-image-updater.argoproj.io/myapp.semver-constraint: "~1.0"
+    
+    # Pull secret for private registry (optional)
+    argocd-image-updater.argoproj.io/myapp.pull-secret: pullsecret:argocd/ghcr-credentials
+```
+
+### Update Strategies
+
+| Strategy | Description | Example |
+|----------|-------------|---------|
+| `semver` | Semantic versioning | `v1.2.3` → `v1.2.4` |
+| `latest` | Always use latest tag | `latest` |
+| `digest` | Update by digest | `@sha256:abc...` |
+| `name` | Lexical sort by name | `20240301` → `20240302` |
+| `regex` | Custom regex pattern | Match custom patterns |
+
+### Example: Semver Updates
+
+```yaml
+annotations:
+  argocd-image-updater.argoproj.io/image-list: api=ghcr.io/hackz-megalo-cup/api-service
+  argocd-image-updater.argoproj.io/api.update-strategy: semver
+  argocd-image-updater.argoproj.io/api.semver-constraint: "^1.0.0"
+```
+
+This will automatically update from `1.0.0` → `1.0.1` → `1.1.0` but not to `2.0.0`.
+
+### Example: Latest Tag
+
+```yaml
+annotations:
+  argocd-image-updater.argoproj.io/image-list: dev-app=ghcr.io/org/dev-app:latest
+  argocd-image-updater.argoproj.io/dev-app.update-strategy: latest
+```
+
+## Setting Up Registry Credentials
+
+For private registries, create a secret with registry credentials:
+
+```bash
+# Create secret for GitHub Container Registry
+kubectl create secret generic ghcr-credentials \
+  -n argocd \
+  --from-literal=token=ghp_your_github_token_here
+```
+
+The token should have `read:packages` scope for reading from GHCR.
+
+## Monitoring Image Updater
+
+### Check Image Updater Logs
+
+```bash
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-image-updater -f
+```
+
+### View Update Status
+
+Image Updater adds annotations to Application resources to track update status:
+
+```bash
+kubectl get application my-app -n argocd -o yaml | grep image-updater
+```
+
+Look for annotations like:
+- `argocd-image-updater.argoproj.io/image-last-update` - Last update timestamp
+- `argocd-image-updater.argoproj.io/write-back-method` - How updates are applied
+
+## Write-Back Methods
+
+Image Updater can update images in two ways:
+
+### 1. ArgoCD (default)
+
+Updates the image parameter directly in ArgoCD (override):
+
+```yaml
+argocd-image-updater.argoproj.io/write-back-method: argocd
+```
+
+Pros: Fast, no Git commit required  
+Cons: Drift from Git source
+
+### 2. Git
+
+Commits changes back to the Git repository:
+
+```yaml
+argocd-image-updater.argoproj.io/write-back-method: git
+argocd-image-updater.argoproj.io/git-branch: main
+```
+
+Pros: Maintains GitOps principles, auditable  
+Cons: Requires write access to repository, slower
+
+## Integration with ApplicationSet
+
+Image Updater works with ArgoCD ApplicationSet to manage multiple applications:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: microservices
+spec:
+  template:
+    metadata:
+      annotations:
+        argocd-image-updater.argoproj.io/image-list: "app=ghcr.io/org/{{name}}"
+        argocd-image-updater.argoproj.io/app.update-strategy: semver
+```
+
+## Configuration Options
+
+### Update Interval
+
+Image Updater checks for new images every 2 minutes by default. Adjust via:
+
+```yaml
+values:
+  config:
+    interval: 5m  # Check every 5 minutes
+```
+
+### Log Level
+
+```yaml
+values:
+  config:
+    log.level: debug  # trace, debug, info, warn, error
+```
+
+## Related Components
+
+<CardGroup cols={2}>
+  <Card title="ArgoCD" icon="arrows-rotate" href="/components/argocd">
+    GitOps continuous delivery
+  </Card>
+  <Card title="GitOps Architecture" icon="diagram-project" href="/architecture/gitops">
+    Complete GitOps workflow
+  </Card>
+  <Card title="Manifest Generation" icon="file-code" href="/operations/manifest-generation">
+    Nixidy manifest generation
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Image Not Updating
+
+Check these common issues:
+
+1. **Registry credentials**: Verify secret exists and has correct token
+   ```bash
+   kubectl get secret ghcr-credentials -n argocd
+   ```
+
+2. **Application annotations**: Ensure annotations are correct
+   ```bash
+   kubectl get application my-app -n argocd -o yaml | grep image-updater
+   ```
+
+3. **Image Updater logs**: Check for errors
+   ```bash
+   kubectl logs -n argocd -l app.kubernetes.io/name=argocd-image-updater
+   ```
+
+4. **Registry API**: Test registry API access
+   ```bash
+   # From inside a pod in the cluster
+   curl https://ghcr.io/v2/
+   ```
+
+### Force Immediate Check
+
+Restart the image updater to force an immediate check:
+
+```bash
+kubectl rollout restart deployment argocd-image-updater -n argocd
+```
+
+### Disable for Specific Application
+
+Remove the image-updater annotations:
+
+```bash
+kubectl annotate application my-app -n argocd \
+  argocd-image-updater.argoproj.io/image-list- \
+  argocd-image-updater.argoproj.io/myapp.update-strategy-
+```
+
+## Best Practices
+
+1. **Use semver in production** - Prevents unexpected breaking changes
+2. **Test in dev first** - Use `latest` strategy in dev, semver in prod
+3. **Set constraints** - Use semver constraints to control update scope
+4. **Monitor updates** - Check logs regularly for update failures
+5. **Git write-back** - Use Git write-back method for production to maintain audit trail
+6. **Limit update frequency** - Avoid checking too frequently to reduce API rate limits

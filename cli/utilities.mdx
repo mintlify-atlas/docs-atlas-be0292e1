@@ -34,7 +34,7 @@ sops-init
 
 ### Output
 
-```bash
+```text
 # New key generated
 Public key: age1abc123def456...
 
@@ -116,7 +116,7 @@ cloudflared-setup
 
 ### Output
 
-```
+```text
 === Cloudflare Tunnel Setup ===
 
 --- Step 1: Logging in to Cloudflare ---
@@ -221,7 +221,7 @@ istio-install
 
 ### Output
 
-```
+```text
 === Installing Gateway API CRDs ===
 customresourcedefinition.apiextensions.k8s.io/gatewayclasses.gateway.networking.k8s.io created
 customresourcedefinition.apiextensions.k8s.io/gateways.gateway.networking.k8s.io created
@@ -319,7 +319,7 @@ cilium-install
 
 ### Output
 
-```
+```text
 === Installing Cilium (with Hubble) via OCI chart ===
 Release "cilium" does not exist. Installing it now.
 
@@ -418,7 +418,7 @@ argocd-bootstrap
 
 ### Output
 
-```
+```text
 Building nixidy manifests...
 Creating argocd namespace...
 namespace/argocd created
@@ -612,7 +612,7 @@ benchmark bootstrap 3 --keep-logs
 
 ### Output
 
-```
+```text
 === Benchmark Configuration ===
   Mode:       bootstrap
   Script:     /path/to/scripts/bootstrap.sh
@@ -655,7 +655,7 @@ For each run:
 
 ### Output Files
 
-```
+```text
 logs/benchmark/
 ├── run_1.json          # Run 1 timing data
 ├── run_2.json          # Run 2 timing data

@@ -33,7 +33,7 @@ gen-manifests
 
 ### Output
 
-```
+```text
 ==> Building nixidy manifests...
 ==> Copying to manifests/...
 ==> Done. manifests/ updated.
@@ -56,7 +56,7 @@ nix build .#legacyPackages.<system>.nixidyEnvs.local.environmentPackage
 
 Generated manifests are organized by component:
 
-```
+```text
 manifests/
 ├── argocd/
 ├── cloudflared/
@@ -112,7 +112,7 @@ watch-manifests
 
 ### Output
 
-```
+```text
 Watching nixidy modules for changes...
 [Running: bash -lc 'bash scripts/gen-manifests.sh && kubectl apply -f manifests/']
 
@@ -196,7 +196,7 @@ fix-chart-hash
 
 ### Output
 
-```
+```text
 === Attempt 1/10 ===
 Found correct hash: sha256-abc123def456...
 Updated: nixidy/observability/prometheus-stack.nix

@@ -31,7 +31,7 @@ debug-k8s
 
 ### Output
 
-```
+```text
 === Pod status ===
 NAMESPACE        NAME                           READY   STATUS    RESTARTS   AGE
 argocd           argocd-server-7d8b9c5f6-xk2mw  1/1     Running   0          2d
@@ -81,7 +81,7 @@ cilium status
 
 #### Example Output
 
-```
+```text
     /¯¯\
  /¯¯\__/¯¯\    Cilium:         OK
  \__/¯¯\__/    Operator:       OK
@@ -235,7 +235,7 @@ hubble observe --protocol UDP --port 53
 
 #### Output Format
 
-```
+```text
 Dec 12 10:23:45.123: microservices/user-service-7d9f8c5b4-x9k2m:43210 -> \
   microservices/auth-service-5c6d7e8f9-p3q4r:8080 to-endpoint FORWARDED (TCP Flags: SYN)
 
@@ -263,7 +263,7 @@ hubble status
 
 #### Example Output
 
-```
+```text
 Healthcheck (via localhost:4245): Ok
 Current/Max Flows: 12,543/16,384 (76.58%)
 Flows/s: 42.35

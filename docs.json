@@ -7,6 +7,7 @@
     "light": "#5b8def",
     "dark": "#1e4ba1"
   },
+  "favicon": "/favicon.svg",
   "navbar": {
     "primary": {
       "type": "github",
@@ -74,7 +75,9 @@
               "components/loki",
               "components/tempo",
               "components/garage",
-              "components/postgresql"
+              "components/postgresql",
+              "components/otel-collector",
+              "components/image-updater"
             ]
           },
           {
