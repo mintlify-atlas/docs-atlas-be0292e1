@@ -1,0 +1,247 @@
+---
+title: Bootstrap Commands
+description: Initialize and configure your Kubernetes cluster with bootstrap commands
+---
+
+The bootstrap commands set up your local Kubernetes environment with all required infrastructure components. Choose between fast development mode or full production-parity mode.
+
+## bootstrap
+
+Dev-fast bootstrap with kindnetd networking (no Cilium). Optimized for quick local development with warm cluster support.
+
+### Syntax
+
+```bash
+bootstrap [--clean] [--full]
+```
+
+### Options
+
+<ParamField path="--clean" type="flag">
+  Force full rebuild by destroying existing cluster and clearing state cache
+</ParamField>
+
+<ParamField path="--full" type="flag">
+  Delegate to bootstrap-full for Cilium-based networking (production parity mode)
+</ParamField>
+
+### Features
+
+- **Warm cluster support**: Automatically detects cluster state and only rebuilds what changed
+- **Hash-based caching**: Tracks cluster config and manifest changes to minimize unnecessary rebuilds
+- **Single control-plane node**: Minimal resource footprint
+- **kindnetd networking**: Fast startup without Cilium overhead
+- **Parallel execution**: 4-phase pipeline with concurrent operations
+
+### Workflow
+
+The bootstrap process runs in 4 phases:
+
+1. **Phase 1: Preparation** (parallel)
+   - Create kind cluster
+   - Generate nixidy manifests
+   - Fetch/build OTel Collector image
+   - Pull container images
+
+2. **Phase 2: Image Load**
+   - Load images into kind cluster
+   - Load custom OTel Collector
+
+3. **Phase 3: Deploy Services** (parallel)
+   - Deploy PostgreSQL (early start)
+   - Deploy Garage (S3-compatible storage)
+   - Deploy observability stack (Prometheus, Grafana, Loki, Tempo)
+   - Deploy Traefik ingress
+   - Deploy Cloudflared tunnel (if configured)
+
+4. **Phase 4: Wait for Readiness**
+   - Wait for all pods to become ready (parallel checks)
+
+### Examples
+
+```bash
+# Standard bootstrap (warm cluster aware)
+bootstrap
+
+# Force clean rebuild
+bootstrap --clean
+
+# Use full Cilium mode instead
+bootstrap --full
+```
+
+### Warm Cluster Behavior
+
+The command intelligently handles existing clusters:
+
+- **Cluster config unchanged + manifests unchanged**: Quick health check only
+- **Cluster config unchanged + manifests changed**: Reapply manifests without cluster rebuild
+- **Cluster config changed**: Full rebuild with new cluster
+- **Cluster unhealthy**: Full rebuild
+
+### Output
+
+After successful bootstrap:
+
+```
+=== Bootstrap complete (dev-fast) ===
+Mode: kindnetd (no Cilium)
+Node: single control-plane
+
+Next: cd microservice-app && tilt up
+
+  Grafana:      http://localhost:30300  (admin/admin)
+  Prometheus:   http://localhost:30090
+  Alertmanager: http://localhost:30093
+  Traefik:      http://localhost:30081
+```
+
+### Related Commands
+
+- [bootstrap-full](#bootstrap-full) - Full production-parity setup
+- [cluster-up](/cli/cluster#cluster-up) - Create cluster only
+- [gen-manifests](/cli/manifests#gen-manifests) - Regenerate manifests
+
+---
+
+## bootstrap-full
+
+Full production-parity bootstrap with Cilium CNI and Istio service mesh. Includes ArgoCD for GitOps and 2 worker nodes.
+
+### Syntax
+
+```bash
+bootstrap-full [--clean]
+```
+
+### Options
+
+<ParamField path="--clean" type="flag">
+  Force full rebuild by destroying existing cluster and clearing state cache
+</ParamField>
+
+### Features
+
+- **Cilium CNI**: eBPF-based networking with Hubble observability
+- **Istio ambient mode**: Service mesh with L4 and L7 capabilities
+- **ArgoCD**: GitOps continuous delivery
+- **Gateway API**: Kubernetes Gateway API v1.5.0 CRDs
+- **Multi-worker setup**: 2 worker nodes for realistic testing
+- **Warm cluster support**: Same intelligent caching as bootstrap
+
+### Workflow
+
+Full bootstrap runs in 4 phases:
+
+1. **Phase 1: Preparation** (parallel)
+   - Create kind cluster (3 nodes: 1 control-plane, 2 workers)
+   - Generate nixidy manifests
+   - Build OTel Collector image
+   - Pull container images (Cilium, Istio, application images)
+
+2. **Phase 2: Network Setup** (sequential)
+   - Load Cilium and OTel images into kind
+   - Install Cilium with Hubble UI
+   - Install Istio ambient mode with tracing
+   - Apply Gateway API CRDs
+   - Start PostgreSQL early (background)
+   - Load remaining images in background
+
+3. **Phase 3: Deploy Services** (parallel)
+   - Deploy ArgoCD
+   - Deploy Garage (S3-compatible storage)
+   - Deploy observability stack
+   - Deploy Cloudflared tunnel (if configured)
+
+4. **Phase 4: Wait for Readiness** (parallel)
+   - Wait for ArgoCD server
+   - Wait for PostgreSQL
+   - Wait for Grafana
+   - Wait for Prometheus
+
+### Examples
+
+```bash
+# Standard full bootstrap
+bootstrap-full
+
+# Force clean rebuild
+bootstrap-full --clean
+```
+
+### Output
+
+After successful bootstrap:
+
+```
+=== Bootstrap complete (full) ===
+ArgoCD will sync the remaining applications automatically.
+
+  ArgoCD:       http://localhost:30080  (admin/<password>)
+  Grafana:      http://localhost:30300  (admin/admin)
+  Prometheus:   http://localhost:30090
+  Alertmanager: http://localhost:30093
+  Hubble UI:    http://localhost:31235
+  Traefik:      http://localhost:30081
+```
+
+### Cilium Configuration
+
+Cilium is installed with Istio coexistence settings:
+
+```yaml
+cni.exclusive: false              # Chain with Istio CNI
+socketLB.hostNamespaceOnly: true  # Avoid Istio traffic conflicts
+kubeProxyReplacement: false       # Safe Istio coexistence
+hubble.enabled: true              # Network observability
+hubble.ui.nodePort: 31235         # Hubble UI access
+```
+
+### Istio Configuration
+
+Istio is installed in ambient mode with:
+
+- Distributed tracing enabled (OpenTelemetry)
+- OTel Collector endpoint: `otel-collector.observability.svc.cluster.local:4317`
+- Waypoint proxy in `microservices` namespace
+- Ambient dataplane mode for labeled namespaces
+
+### Related Commands
+
+- [bootstrap](#bootstrap) - Fast dev mode
+- [cilium-install](/cli/utilities#cilium-install) - Install Cilium separately
+- [istio-install](/cli/utilities#istio-install) - Install Istio separately
+- [argocd-bootstrap](/cli/utilities#argocd-bootstrap) - Bootstrap ArgoCD only
+
+---
+
+## full-bootstrap
+
+<Warning>
+Legacy command. Use [bootstrap-full](#bootstrap-full) instead for current full setup.
+</Warning>
+
+Lightweight bootstrap without Istio and ArgoCD. Single worker node for reduced memory usage.
+
+### Syntax
+
+```bash
+full-bootstrap
+```
+
+### Features
+
+- Cilium CNI with Hubble
+- Single worker node (reduced from 2)
+- No Istio service mesh
+- No ArgoCD (use Tilt for app deployment)
+- Memory-optimized configuration
+
+### Use Case
+
+Ideal for development environments with memory constraints where service mesh and GitOps are not required.
+
+### Related Commands
+
+- [bootstrap](#bootstrap) - Recommended fast dev mode
+- [bootstrap-full](#bootstrap-full) - Recommended full production-parity mode

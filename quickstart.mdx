@@ -1,80 +1,415 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get the microservice infrastructure platform up and running in minutes
 ---
 
-## Get started in three steps
-
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide will walk you through setting up a local Kubernetes cluster with the complete observability and networking stack.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+Make sure you've completed the [Prerequisites](/prerequisites) before starting this guide.
 </Note>
+
+## Choose Your Bootstrap Mode
+
+The platform offers three bootstrap modes depending on your needs:
+
+| Mode | Command | CNI | Nodes | Setup Time | Use Case |
+|------|---------|-----|-------|------------|----------|
+| **Dev-fast** | `bootstrap` | kindnetd | 1 | ~120s | Daily development |
+| **Cilium** | `bootstrap --full` | Cilium + Hubble | 2 | ~200s | CNI testing |
+| **Full** | `full-bootstrap` | Cilium + Istio | 3 | ~250s | Full-stack validation |
+
+For your first time, we recommend starting with **Dev-fast mode** to get up and running quickly.
+
+## Dev-Fast Setup (Recommended)
+
+The dev-fast mode provides the fastest bootstrap experience with warm cluster support. After the initial setup, subsequent runs complete almost instantly if nothing has changed.
+
+<Steps>
+
+<Step title="Navigate to the project directory">
+
+```bash
+cd /path/to/microservice-infra
+```
+
+Make sure direnv has loaded the environment (you should see the welcome message with available commands).
+
+</Step>
+
+<Step title="Run the bootstrap command">
+
+```bash
+bootstrap
+```
+
+This command will:
+- Create a Kind cluster with a single control-plane node
+- Generate Kubernetes manifests using nixidy
+- Pull and load required container images
+- Deploy the full observability stack (Prometheus, Grafana, Loki, Tempo)
+- Deploy Traefik ingress controller
+- Deploy PostgreSQL database
+- Deploy Garage object storage
+
+The first run (cold start) takes approximately **120 seconds** on modern hardware.
+
+</Step>
+
+<Step title="Wait for bootstrap to complete">
+
+You'll see output showing the bootstrap phases:
+
+```
+=== Phase 1: Parallel prep (kind + manifests + OTel + images) ===
+Cluster 'microservice-infra' already exists.
+Generating manifests...
+Fetching OTel Collector image...
+Pulling 28 images in parallel...
+
+=== Phase 2: Load images into kind ===
+Loading images into kind cluster...
+
+=== Phase 3: Deploy core services ===
+Deploying Garage...
+Deploying observability stack...
+Deploying Traefik...
+Deploying Cloudflared...
+
+=== Phase 4: Wait for pods ===
+Waiting for PostgreSQL to be ready...
+Waiting for Grafana to be ready...
+Waiting for Prometheus to be ready...
+
+✓ Bootstrap complete!
+```
+
+</Step>
+
+<Step title="Verify the installation">
+
+Check that all pods are running:
+
+```bash
+kubectl get pods -A
+```
+
+You should see pods in various namespaces (kube-system, monitoring, storage, etc.) with status `Running`.
+
+For a quick health check, use:
+
+```bash
+debug-k8s
+```
+
+This will show pod status and recent events across all namespaces.
+
+</Step>
+
+</Steps>
+
+## Accessing Services
+
+Once bootstrap is complete, you can access the platform services via NodePort on your localhost:
+
+### Service Ports
+
+| Port | Service | Credentials | Notes |
+|------|---------|-------------|-------|
+| 30081 | Traefik HTTP | - | Ingress controller |
+| 30090 | Prometheus | - | Metrics database |
+| 30093 | Alertmanager | - | Alert management |
+| 30300 | Grafana | `admin` / `admin` | Dashboards & visualization |
+
+**Example**: Access Grafana at [http://localhost:30300](http://localhost:30300)
+
+<Note>
+Default Grafana credentials are `admin` / `admin`. You'll be prompted to change the password on first login.
+</Note>
+
+### Verify Grafana
+
+<Steps>
+
+<Step title="Open Grafana in your browser">
+
+Navigate to [http://localhost:30300](http://localhost:30300)
+
+</Step>
+
+<Step title="Log in with default credentials">
+
+- **Username**: `admin`
+- **Password**: `admin`
+
+</Step>
+
+<Step title="Explore pre-configured dashboards">
+
+Go to Dashboards → Browse to see pre-configured dashboards for Kubernetes, Prometheus, Loki, and Tempo.
+
+</Step>
+
+</Steps>
+
+## Warm Cluster Support
+
+One of the key features of dev-fast mode is **warm cluster** support. The bootstrap script uses hash-based detection to skip unnecessary work:
+
+- On subsequent runs, if the cluster and manifests haven't changed, bootstrap completes **instantly**
+- If only manifests changed, only the changed resources are reapplied (~10-15s)
+- If the cluster configuration changed, a full rebuild occurs (~120s)
+
+**Force a clean rebuild:**
+
+```bash
+bootstrap --clean
+```
+
+This deletes the existing cluster and starts fresh.
+
+## Alternative Bootstrap Modes
+
+### Cilium Mode
+
+For testing with Cilium CNI and Hubble network observability:
+
+```bash
+bootstrap --full
+# or
+bootstrap-full
+```
+
+This creates a 2-node cluster (control-plane + 1 worker) with Cilium and Hubble.
+
+**Additional ports in Cilium mode:**
+
+| Port | Service | Notes |
+|------|---------|-------|
+| 31235 | Hubble UI | Network flow visualization |
+
+Access Hubble UI at [http://localhost:31235](http://localhost:31235)
+
+### Full-Stack Mode
+
+For testing the complete setup with Istio service mesh and ArgoCD:
+
+```bash
+full-bootstrap
+```
+
+This creates a 3-node cluster (control-plane + 2 workers) with Cilium, Istio ambient mode, and ArgoCD.
+
+**Additional ports in full mode:**
+
+| Port | Service | Notes |
+|------|---------|-------|
+| 31235 | Hubble UI | Network flow visualization |
+| 30080 | ArgoCD HTTP | GitOps controller |
+| 30443 | ArgoCD HTTPS | GitOps controller (TLS) |
+
+<Note>
+Full-stack mode also supports warm cluster. Use `full-bootstrap --clean` to force a clean rebuild.
+</Note>
+
+## Managing Your Cluster
+
+### Stop the Cluster (Preserve State)
+
+To stop the cluster containers without deleting data:
+
+```bash
+cluster-stop
+```
+
+This pauses the Docker containers. Use this when you need to free up system resources but want to resume work later.
+
+### Restart a Stopped Cluster
+
+To resume a stopped cluster:
+
+```bash
+cluster-start
+```
+
+The cluster will resume with all data and state preserved.
+
+### Delete the Cluster
+
+To completely remove the cluster and all data:
+
+```bash
+cluster-down
+```
+
+<Note>
+After `cluster-down`, you'll need to run `bootstrap` again to recreate the cluster.
+</Note>
+
+## Working with Manifests
+
+The platform uses [nixidy](https://github.com/arnarg/nixidy) to generate Kubernetes manifests from Nix expressions.
+
+### Regenerate Manifests
+
+If you modify any Nix files in `nixidy/`:
+
+```bash
+gen-manifests
+```
+
+This regenerates manifests in the `manifests-result/` directory.
+
+### Apply Manifest Changes
+
+After regenerating manifests, apply them to the cluster:
+
+```bash
+kubectl apply -f manifests-result/
+```
+
+### Watch for Changes
+
+To automatically regenerate and apply manifests when Nix files change:
+
+```bash
+watch-manifests
+```
+
+This runs `watchexec` to monitor `nixidy/` directory and automatically regenerate + apply manifests on any `.nix` file change.
+
+## Monitoring and Debugging
+
+### View Cluster Status
+
+```bash
+# Get all nodes
+kubectl get nodes
+
+# Get all pods across all namespaces
+kubectl get pods -A
+
+# Get events
+kubectl get events -A --sort-by=.lastTimestamp
+```
+
+### Quick Debug Command
+
+The `debug-k8s` command shows a quick overview:
+
+```bash
+debug-k8s
+```
+
+Output:
+```
+=== Pod status ===
+NAMESPACE     NAME                          READY   STATUS    RESTARTS
+kube-system   coredns-7db6d8ff4d-abcde     1/1     Running   0
+monitoring    prometheus-0                  1/1     Running   0
+monitoring    grafana-5d7b9c8f6d-xyz12     1/1     Running   0
+...
+
+=== Recent events ===
+(last 10 events sorted by timestamp)
+```
+
+### Check Logs
+
+```bash
+# View logs for a specific pod
+kubectl logs -n monitoring grafana-5d7b9c8f6d-xyz12
+
+# Follow logs in real-time
+kubectl logs -f -n monitoring prometheus-0
+```
+
+### Cilium Network Observability (Cilium/Full mode only)
+
+```bash
+# Check Cilium status
+cilium status
+
+# Open Hubble UI in browser
+cilium hubble ui
+# Opens http://localhost:12000
+
+# Observe network flows from CLI
+hubble observe -n monitoring
+```
+
+## Next Steps
+
+Now that your platform is running, you can:
+
+- **Deploy applications**: Use the companion [microservice-app](https://github.com/hackz-megalo-cup/microservice-app) repository to deploy sample applications
+- **Explore dashboards**: Check out the pre-configured Grafana dashboards at [http://localhost:30300](http://localhost:30300)
+- **Monitor metrics**: View Prometheus targets and metrics at [http://localhost:30090](http://localhost:30090)
+- **Customize the stack**: Modify the Nix configurations in `nixidy/` to add or remove components
+
+## Troubleshooting
+
+### Bootstrap hangs or fails
+
+If bootstrap gets stuck, check Docker is running and you have sufficient resources:
+
+```bash
+docker ps
+docker stats
+```
+
+Try a clean restart:
+
+```bash
+cluster-down
+bootstrap --clean
+```
+
+### Pods stuck in Pending state
+
+Check cluster resources and events:
+
+```bash
+kubectl describe pod <pod-name> -n <namespace>
+kubectl get events -A --sort-by=.lastTimestamp | tail -20
+```
+
+### Port conflicts
+
+If you see port binding errors, make sure no other services are using the platform ports (30080-31235). You can check with:
+
+```bash
+# On Linux/macOS
+lsof -i :30300
+
+# On all platforms via netstat
+netstat -an | grep LISTEN | grep 30300
+```
+
+### Images fail to pull
+
+Check your internet connection and Docker daemon status:
+
+```bash
+docker pull busybox
+docker system info
+```
+
+If behind a proxy, ensure Docker is configured with proxy settings.
+
+### Warm cluster detection fails
+
+If you want to force a specific behavior:
+
+```bash
+# Force full rebuild
+bootstrap --clean
+
+# Manually check cluster health
+kubectl get nodes
+kind get clusters
+```
+
+---
+
+For more detailed information about the different bootstrap modes and their internals, check the `docs/bootstrap-modes.md` file in the repository.

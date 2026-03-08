@@ -1,0 +1,444 @@
+---
+title: Grafana Dashboard Development
+description: Creating and deploying Grafana dashboards using grafonnet and jsonnet
+---
+
+## Overview
+
+The project uses [grafonnet](https://github.com/grafana/grafonnet) for declarative Grafana dashboard development. Dashboards are written in Jsonnet, compiled at build time, and deployed as Kubernetes ConfigMaps.
+
+## Architecture
+
+Dashboards follow this workflow:
+
+1. **Write** Jsonnet dashboard code in `dashboards/src/`
+2. **Compile** with go-jsonnet (via Nix build)
+3. **Inject** into ConfigMaps using nixidy module
+4. **Deploy** via ArgoCD
+5. **Auto-discover** by Grafana dashboard sidecar
+
+## Directory Structure
+
+```
+dashboards/
+├── jsonnetfile.json       # Jsonnet dependencies
+└── src/
+    ├── g.libsonnet        # Grafonnet library import
+    ├── sample-app.jsonnet # Sample application dashboard
+    └── k8s-cluster.jsonnet # Kubernetes cluster dashboard
+```
+
+## Grafonnet Setup
+
+### Dependency Declaration
+
+Dashboard dependencies are declared in `jsonnetfile.json`:
+
+```json
+{
+  "version": 1,
+  "dependencies": [
+    {
+      "source": {
+        "git": {
+          "remote": "https://github.com/grafana/grafonnet",
+          "subdir": "gen/grafonnet-latest"
+        }
+      },
+      "version": "main"
+    }
+  ],
+  "legacyImports": true
+}
+```
+
+### Library Import
+
+The `g.libsonnet` file provides a simple import (dashboards/src/g.libsonnet):
+
+```jsonnet
+import 'main.libsonnet'
+```
+
+This is resolved by the build system to the full grafonnet library.
+
+## Writing Dashboards
+
+### Basic Structure
+
+All dashboards follow this pattern:
+
+```jsonnet
+local g = import 'g.libsonnet';
+
+local dashboard = g.dashboard;
+local panel = g.panel;
+local query = g.query;
+
+local datasource = 'Prometheus';
+
+// Define queries
+local myQuery =
+  query.prometheus.new(datasource, 'up{job="my-app"}')
+  + query.prometheus.withLegendFormat('{{ instance }}');
+
+// Build dashboard
+dashboard.new('My Dashboard')
++ dashboard.withUid('my-dashboard-uid')
++ dashboard.withDescription('Dashboard description')
++ dashboard.withTags(['tag1', 'tag2'])
++ dashboard.graphTooltip.withSharedCrosshair()
++ dashboard.withRefresh('30s')
++ dashboard.withPanels([
+  panel.timeSeries.new('My Panel')
+  + panel.timeSeries.queryOptions.withTargets([myQuery])
+  + panel.timeSeries.standardOptions.withUnit('short')
+  + panel.timeSeries.gridPos.withW(12)
+  + panel.timeSeries.gridPos.withH(8)
+  + panel.timeSeries.gridPos.withX(0)
+  + panel.timeSeries.gridPos.withY(0),
+])
+```
+
+### Sample Application Dashboard
+
+Here's a real example from dashboards/src/sample-app.jsonnet showing OTel metrics:
+
+```jsonnet
+local g = import 'g.libsonnet';
+
+local dashboard = g.dashboard;
+local panel = g.panel;
+local query = g.query;
+
+local datasource = 'Prometheus';
+
+// -- Queries --
+local requestRateQuery =
+  query.prometheus.new(
+    datasource,
+    'sum(rate(sample_app_requests_total{job="sample-app"}[$__rate_interval])) by (endpoint)',
+  )
+  + query.prometheus.withLegendFormat('{{ endpoint }}');
+
+local httpDurationP99Query =
+  query.prometheus.new(
+    datasource,
+    'histogram_quantile(0.99, sum(rate(http_server_duration_milliseconds_bucket{job="sample-app"}[$__rate_interval])) by (le))',
+  )
+  + query.prometheus.withLegendFormat('p99');
+
+local errorRateQuery =
+  query.prometheus.new(
+    datasource,
+    'sum(rate(http_server_duration_milliseconds_count{job="sample-app", http_status_code=~"5.."}[$__rate_interval])) / sum(rate(http_server_duration_milliseconds_count{job="sample-app"}[$__rate_interval]))',
+  )
+  + query.prometheus.withLegendFormat('Error Rate');
+
+// -- Dashboard --
+dashboard.new('Sample App Overview')
++ dashboard.withUid('sample-app-overview')
++ dashboard.withDescription('Observability dashboard for the sample-app (OTel instrumented)')
++ dashboard.withTags(['sample-app', 'otel'])
++ dashboard.graphTooltip.withSharedCrosshair()
++ dashboard.withRefresh('30s')
++ dashboard.withPanels([
+  panel.timeSeries.new('Request Rate')
+  + panel.timeSeries.queryOptions.withTargets([requestRateQuery])
+  + panel.timeSeries.standardOptions.withUnit('reqps')
+  + panel.timeSeries.gridPos.withW(12)
+  + panel.timeSeries.gridPos.withH(8)
+  + panel.timeSeries.gridPos.withX(0)
+  + panel.timeSeries.gridPos.withY(0),
+
+  panel.timeSeries.new('HTTP Request Duration')
+  + panel.timeSeries.queryOptions.withTargets([httpDurationP99Query, httpDurationP50Query])
+  + panel.timeSeries.standardOptions.withUnit('ms')
+  + panel.timeSeries.gridPos.withW(16)
+  + panel.timeSeries.gridPos.withH(8),
+])
+```
+
+### Kubernetes Cluster Dashboard
+
+The k8s-cluster.jsonnet provides comprehensive cluster monitoring with:
+
+- **Stat Panels**: Node count, pod counts by phase, cluster CPU/memory
+- **Time Series**: Node resource usage, pod restarts, network I/O
+- **Resource Comparison**: CPU/memory requests vs actual usage
+
+Key features:
+- Uses `node_exporter` and `kube-state-metrics` data
+- Filters virtual network devices: `device!~"lo|veth.*|docker.*|flannel.*|cali.*|cbr.*"`
+- Shows top 10 restarting pods
+- Compares resource requests vs actual consumption by namespace
+
+## Panel Types
+
+Grafonnet supports multiple panel types:
+
+### Time Series
+```jsonnet
+panel.timeSeries.new('CPU Usage')
++ panel.timeSeries.queryOptions.withTargets([cpuQuery])
++ panel.timeSeries.standardOptions.withUnit('percent')
++ panel.timeSeries.standardOptions.withMax(100)
++ panel.timeSeries.gridPos.withW(12)
++ panel.timeSeries.gridPos.withH(8)
+```
+
+### Stat Panel
+```jsonnet
+panel.stat.new('Total Nodes')
++ panel.stat.queryOptions.withTargets([nodeCountQuery])
++ panel.stat.standardOptions.withUnit('short')
++ panel.stat.gridPos.withW(4)
++ panel.stat.gridPos.withH(4)
+```
+
+### Common Units
+- `percentunit` - 0.0 to 1.0 as percentage
+- `percent` - 0 to 100
+- `bytes` - Bytes with SI prefixes
+- `Bps` - Bytes per second
+- `ms` - Milliseconds
+- `s` - Seconds
+- `reqps` - Requests per second
+- `short` - Plain number with abbreviations
+
+## Build Integration
+
+Dashboards are compiled and injected via nixidy (nixidy/env/local/grafana-dashboards.nix):
+
+```nix
+{ pkgs, ... }:
+let
+  grafonnet-src = pkgs.fetchFromGitHub {
+    owner = "grafana";
+    repo = "grafonnet";
+    rev = "7380c9c64fb973f34c3ec46265621a2b0dee0058";
+    hash = "sha256-WS3Z/k9fDSleK6RVPTFQ9Um26GRFv/kxZhARXpGkS10=";
+  };
+
+  dashboardsSrc = ../../../dashboards/src;
+
+  compileDashboard =
+    name:
+    builtins.readFile (
+      pkgs.runCommand "grafana-dashboard-${name}" 
+        { nativeBuildInputs = [ pkgs.go-jsonnet ]; } ''
+        mkdir -p $out
+        mkdir -p vendor/github.com/grafana
+        ln -s ${grafonnet-src} vendor/github.com/grafana/grafonnet
+        export JSONNET_PATH="vendor:${grafonnet-src}/gen/grafonnet-latest:${dashboardsSrc}"
+        jsonnet ${dashboardsSrc}/${name}.jsonnet \
+                -o $out/${name}.json
+      ''
+      + "/${name}.json"
+    );
+in
+{
+  applications.kube-prometheus-stack = {
+    resources.configMaps.sample-app-dashboard = {
+      metadata.labels = {
+        grafana_dashboard = "1";
+      };
+      data."sample-app.json" = compileDashboard "sample-app";
+    };
+
+    resources.configMaps.k8s-cluster-dashboard = {
+      metadata.labels = {
+        grafana_dashboard = "1";
+      };
+      data."k8s-cluster.json" = compileDashboard "k8s-cluster";
+    };
+  };
+}
+```
+
+### Build Process
+
+1. **Fetch grafonnet**: Downloads specific commit from GitHub
+2. **Setup vendor directory**: Creates symlink to grafonnet library
+3. **Set JSONNET_PATH**: Configures import resolution
+4. **Compile**: Runs `go-jsonnet` to generate JSON
+5. **Inject into ConfigMap**: Embeds compiled JSON with label `grafana_dashboard = "1"`
+
+### Grafana Discovery
+
+Grafana's dashboard sidecar automatically discovers ConfigMaps with the label:
+
+```yaml
+metadata:
+  labels:
+    grafana_dashboard: "1"
+```
+
+Configured in kube-prometheus-stack (nixidy/env/local/kube-prometheus-stack.nix):
+
+```nix
+grafana = {
+  enabled = true;
+  sidecar.dashboards.enabled = true;  # implicit default
+  ...
+};
+```
+
+## Development Workflow
+
+### 1. Create Dashboard
+
+Create a new Jsonnet file in `dashboards/src/`:
+
+```bash
+# Create new dashboard
+cat > dashboards/src/my-dashboard.jsonnet <<'EOF'
+local g = import 'g.libsonnet';
+
+local dashboard = g.dashboard;
+local panel = g.panel;
+local query = g.query;
+
+dashboard.new('My Dashboard')
++ dashboard.withUid('my-dashboard')
++ dashboard.withPanels([
+  // Add panels here
+])
+EOF
+```
+
+### 2. Add to Nixidy Module
+
+Edit `nixidy/env/local/grafana-dashboards.nix` to include your dashboard:
+
+```nix
+resources.configMaps.my-dashboard = {
+  metadata.labels = {
+    grafana_dashboard = "1";
+  };
+  data."my-dashboard.json" = compileDashboard "my-dashboard";
+};
+```
+
+### 3. Generate and Deploy
+
+```bash
+# Generate manifests
+gen-manifests
+
+# Apply to cluster
+kubectl apply -f manifests/
+
+# Or use watch mode for rapid iteration
+watch-manifests
+```
+
+### 4. Verify in Grafana
+
+Grafana is exposed on NodePort 30300:
+
+```bash
+# Open Grafana
+open http://localhost:30300
+
+# Default credentials: admin / admin
+```
+
+Dashboards appear in the "General" folder within ~30 seconds.
+
+## Testing Dashboards Locally
+
+You can test compilation without deploying:
+
+```bash
+# Compile dashboard manually
+cd dashboards/src
+jb install  # Install dependencies
+jsonnet -J vendor sample-app.jsonnet | jq .
+```
+
+## Query Tips
+
+### Using Rate Intervals
+
+Always use `$__rate_interval` instead of hardcoded intervals:
+
+```jsonnet
+// Good
+'rate(http_requests_total[$__rate_interval])'
+
+// Bad
+'rate(http_requests_total[5m])'
+```
+
+### Histogram Quantiles
+
+For percentiles from histograms:
+
+```jsonnet
+'histogram_quantile(0.99, sum(rate(http_duration_bucket[$__rate_interval])) by (le))'
+```
+
+### Error Rate Calculation
+
+```jsonnet
+'sum(rate(http_requests_total{status=~"5.."}[$__rate_interval])) / sum(rate(http_requests_total[$__rate_interval]))'
+```
+
+## Best Practices
+
+1. **Use Variables**: Define queries as local variables for reusability
+2. **Shared Crosshair**: Always use `dashboard.graphTooltip.withSharedCrosshair()`
+3. **Auto-refresh**: Set reasonable refresh intervals (30s for most dashboards)
+4. **Panel Layout**: Use grid positions to create organized layouts
+5. **Legend Format**: Use meaningful legend templates like `{{ namespace }}/{{ pod }}`
+6. **Units**: Always specify appropriate units for clarity
+7. **Tags**: Add tags for discoverability
+8. **Descriptions**: Add dashboard and panel descriptions
+
+## Troubleshooting
+
+### Dashboard Not Appearing
+
+1. Check ConfigMap was created:
+   ```bash
+   kubectl get configmap -n observability | grep dashboard
+   ```
+
+2. Verify label is present:
+   ```bash
+   kubectl get configmap sample-app-dashboard -n observability -o yaml | grep grafana_dashboard
+   ```
+
+3. Check Grafana sidecar logs:
+   ```bash
+   kubectl logs -n observability deployment/kube-prometheus-stack-grafana -c grafana-sc-dashboard
+   ```
+
+### Compilation Errors
+
+If `gen-manifests` fails with Jsonnet errors:
+
+1. Test compilation directly:
+   ```bash
+   cd dashboards/src
+   jsonnet -J vendor my-dashboard.jsonnet
+   ```
+
+2. Check JSONNET_PATH is correct
+3. Verify all imports are available
+
+### Query Not Showing Data
+
+1. Test query in Grafana's Explore view
+2. Check Prometheus has the metrics:
+   ```bash
+   open http://localhost:30090
+   ```
+3. Verify ServiceMonitor/PodMonitor is scraping the target
+
+## Next Steps
+
+- Learn about [nixidy module structure](/development/nixidy)
+- Set up [development environment](/development/environment-setup)
+- Run [performance benchmarks](/development/benchmarking)

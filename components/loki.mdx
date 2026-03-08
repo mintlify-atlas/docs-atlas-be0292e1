@@ -1,0 +1,253 @@
+---
+title: Loki
+description: Log aggregation with S3-compatible storage backend
+---
+
+## Overview
+
+Loki aggregates and stores logs from all pods in the cluster, providing a scalable alternative to traditional log databases. It uses Garage (S3-compatible storage) as the backend for long-term log storage.
+
+## Configuration
+
+### Nixidy Module (`nixidy/env/local/loki.nix`)
+
+```nix
+applications.loki = {
+  namespace = "observability";
+  createNamespace = false;  # kube-prometheus-stack creates it
+  
+  helm.releases.loki = {
+    chart = charts.grafana.loki;
+    values = {
+      deploymentMode = "SingleBinary";
+      loki = {
+        auth_enabled = false;
+        commonConfig.replication_factor = 1;
+        storage = {
+          type = "s3";
+          bucketNames = {
+            chunks = "loki-chunks";
+            ruler = "loki-chunks";
+            admin = "loki-chunks";
+          };
+          s3 = {
+            endpoint = "http://garage.storage:3900";
+            region = "garage";
+            insecure = true;
+            s3forcepathstyle = true;
+          };
+        };
+      };
+    };
+  };
+};
+```
+
+## Architecture
+
+### Deployment Mode
+
+**SingleBinary** mode runs all Loki components in one pod:
+- Distributor (receives logs)
+- Ingester (writes chunks)
+- Querier (reads logs)
+- Compactor (optimizes storage)
+
+This is ideal for local development with lower resource usage.
+
+### Storage Backend
+
+Loki uses **Garage S3** for persistent storage:
+
+- **Endpoint**: `http://garage.storage:3900`
+- **Bucket**: `loki-chunks`
+- **Region**: `garage`
+- **Path style**: Forced (required for Garage)
+
+**Credentials**: Injected via secret `garage-s3-credentials`:
+
+```yaml
+extraEnvFrom:
+  - secretRef:
+      name: garage-s3-credentials
+```
+
+## Schema Configuration
+
+Loki uses TSDB schema (v13) for efficient log storage:
+
+```yaml
+schemaConfig:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: loki_index_
+        period: 24h
+```
+
+### Schema Features
+
+- **TSDB**: Time-series database index format
+- **S3 object store**: Chunks stored in Garage
+- **24h index period**: Daily index rotation
+- **v13 schema**: Latest schema version
+
+## Service
+
+### Ports
+
+| Port | Protocol | Purpose |
+|---|---|---|
+| 3100 | HTTP | Query API and metrics |
+| 9095 | gRPC | Internal component communication |
+
+### Endpoint
+
+- **Internal URL**: `http://loki.observability:3100`
+- **Namespace**: `observability`
+
+## Persistence
+
+### Local Storage (WAL)
+
+```yaml
+singleBinary:
+  persistence:
+    enabled: true
+    size: 5Gi
+```
+
+Local PV used for:
+- Write-Ahead Log (WAL)
+- Temporary chunk buffer before S3 upload
+- Index cache
+
+### Object Storage (Chunks)
+
+Log chunks are written to Garage S3:
+1. Logs arrive at Loki
+2. Written to local WAL
+3. Batched into chunks
+4. Uploaded to `loki-chunks` bucket in Garage
+5. WAL flushed
+
+## Log Collection
+
+Logs are collected via **Promtail** (or another Loki client):
+
+```
+Pod → Promtail (DaemonSet) → Loki → Garage S3
+```
+
+Promtail runs on every node and scrapes:
+- Container logs from `/var/log/pods`
+- Systemd journal
+- Custom log files
+
+## Query Language (LogQL)
+
+Loki uses LogQL for log queries:
+
+### Label Filtering
+
+```logql
+{namespace="microservices", pod=~"greeter-.*"}
+```
+
+### Text Search
+
+```logql
+{namespace="microservices"} |= "error" != "timeout"
+```
+
+### Parsed Fields
+
+```logql
+{namespace="microservices"} | json | level="error"
+```
+
+### Aggregations
+
+```logql
+sum(rate({namespace="microservices"}[5m])) by (pod)
+```
+
+## Integration
+
+### Grafana Data Source
+
+Loki is configured as a Grafana data source:
+
+```yaml
+name: Loki
+type: loki
+url: http://loki.observability:3100
+access: proxy
+```
+
+**Logs UI**: Explore → Loki → Query logs
+
+### Tempo Correlation
+
+Grafana links traces to logs:
+
+```yaml
+tracesToLogsV2:
+  datasourceUid: loki
+  filterByTraceID: true
+```
+
+**Workflow**: View trace span → Click "Logs for this span" → See related logs
+
+### Garage S3
+
+Loki depends on Garage for chunk storage:
+
+1. **Setup**: Run `garage-setup.sh` to create bucket and credentials
+2. **Bucket**: `loki-chunks` created in Garage
+3. **Secret**: `garage-s3-credentials` injected into Loki pod
+
+## Performance
+
+### Replication Factor
+
+```yaml
+commonConfig:
+  replication_factor: 1
+```
+
+Single replica for local development (no redundancy).
+
+### Caching
+
+Caches are disabled in local config:
+
+```yaml
+chunksCache.enabled: false
+resultsCache.enabled: false
+```
+
+This reduces memory usage at the cost of query performance.
+
+## Storage Credentials
+
+Loki accesses Garage via S3 credentials:
+
+```bash
+kubectl get secret garage-s3-credentials -n observability -o yaml
+```
+
+**Fields**:
+- `AWS_ACCESS_KEY_ID`: Garage access key (GK...)
+- `AWS_SECRET_ACCESS_KEY`: Garage secret key
+
+These are created by `garage-setup.sh` script.
+
+## Related Components
+
+- [Garage](/components/garage) - S3 backend for chunks
+- [Grafana](/components/grafana) - Log visualization
+- [Tempo](/components/tempo) - Trace-to-log correlation

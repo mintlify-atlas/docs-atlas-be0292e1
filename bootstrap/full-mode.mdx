@@ -1,0 +1,329 @@
+---
+title: "Full Mode"
+description: "Complete production-like stack with Istio, ArgoCD, and 2 workers"
+---
+
+## Overview
+
+Full mode (`full-bootstrap.sh`) provides a complete production-like environment with Istio service mesh (ambient mode), ArgoCD for GitOps, and 2 worker nodes. It includes warm cluster support for faster subsequent starts.
+
+<Info>
+**Cold start:** ~250s | **Warm start:** Instant (hash match) / manifest reapply only
+</Info>
+
+## Key Features
+
+- **Cilium + Hubble** - Full CNI with network observability
+- **Istio ambient mode** - Service mesh without sidecars
+- **ArgoCD** - GitOps continuous deployment
+- **2 worker nodes** - Production-like multi-node setup
+- **Warm cluster support** - Hash-based state detection
+- **4-phase parallel execution** - Optimized deployment
+
+## Command Usage
+
+```bash
+# Standard bootstrap (warm cluster aware)
+full-bootstrap
+
+# Force clean rebuild
+full-bootstrap --clean
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--clean` | Delete existing cluster and force cold start |
+
+## Warm Cluster (Hash Gate)
+
+Full-bootstrap uses the same hash-based detection as dev-fast, but with a separate state directory:
+
+### Hash Storage
+
+- `.bootstrap-state-full/cluster` - Hash of `kind-config.yaml` + `images.sh`
+- `.bootstrap-state-full/manifest` - Hash of entire `manifests-result/` directory
+
+### Decision Logic
+
+<Steps>
+  <Step title="Cluster running + cluster hash match + manifest hash match">
+    **Instant complete** - Health check only, no deployment
+  </Step>
+  <Step title="Cluster running + cluster hash match + manifest hash mismatch">
+    **Warm reapply** - Regenerate and reapply manifests only
+  </Step>
+  <Step title="Cluster hash mismatch or cluster stopped">
+    **Cold start** (~250s) - Full cluster rebuild
+  </Step>
+</Steps>
+
+## 4-Phase Parallel Execution
+
+### Phase 1: Preparation (Parallel)
+
+All tasks run concurrently:
+
+```bash
+timed_step "phase1-prep" parallel_run \
+  "kind-cluster:_step_kind_cluster" \
+  "gen-manifests:bash ${SCRIPT_DIR}/gen-manifests.sh" \
+  "otel-build:bash ${SCRIPT_DIR}/load-otel-collector-image.sh build" \
+  "image-preload:_step_image_preload"
+```
+
+- **kind-cluster** - Create cluster with `kind-config.yaml` (2 workers)
+- **gen-manifests** - Generate all Kubernetes manifests
+- **otel-build** - Build OTel collector image
+- **image-preload** - Pull all images (PRELOAD_IMAGES_FULL)
+
+### Phase 2: Network Setup (Sequential)
+
+```bash
+timed_step "phase2-network" _step_network_setup
+```
+
+<Steps>
+  <Step title="Load Cilium image">
+    Load Cilium into kind cluster
+  </Step>
+  <Step title="Load OTel image">
+    Load custom OTel collector
+  </Step>
+  <Step title="Background image load">
+    Start loading remaining images in background
+  </Step>
+  <Step title="Install Cilium">
+    Deploy Cilium CNI (overlaps with image loading)
+  </Step>
+  <Step title="Install Istio">
+    Deploy Istio in ambient mode
+  </Step>
+  <Step title="Apply Gateway API CRDs">
+    Install Gateway API v1.5.0 CRDs
+  </Step>
+  <Step title="Wait for images">
+    Ensure all images loaded
+  </Step>
+  <Step title="PostgreSQL early start">
+    Start PostgreSQL (~87s startup time)
+  </Step>
+</Steps>
+
+### Phase 3: Deploy Services (Parallel)
+
+```bash
+timed_step "phase3-deploy" parallel_run \
+  "argocd-apply:_step_argocd_apply" \
+  "garage:_step_garage_deploy" \
+  "observability:_step_observability" \
+  "cloudflared:_step_cloudflared"
+```
+
+All services deploy concurrently:
+
+- **argocd** - GitOps controller
+- **garage** - S3-compatible storage (wait for ready + setup)
+- **observability** - Prometheus stack, Loki, Tempo, OTel collector
+- **cloudflared** - Cloudflare tunnel (if credentials exist)
+
+<Note>
+Traefik is omitted in full mode - Istio Gateway handles ingress.
+</Note>
+
+### Phase 4: Wait for Pods (Parallel)
+
+Wait for critical pods in parallel:
+
+```bash
+kubectl wait --for=condition=available deployment/argocd-server -n argocd
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n database
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=grafana -n observability
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=prometheus -n observability
+```
+
+## Cluster Configuration
+
+<AccordionGroup>
+  <Accordion title="kind-config.yaml">
+    ```yaml
+    kind: Cluster
+    apiVersion: kind.x-k8s.io/v1alpha4
+    name: microservice-infra
+    networking:
+      disableDefaultCNI: true  # Cilium will be installed
+    nodes:
+      - role: control-plane
+        kubeadmConfigPatches:
+          - |
+            kind: InitConfiguration
+            nodeRegistration:
+              kubeletExtraArgs:
+                node-labels: "ingress-ready=true"
+        extraPortMappings:
+          - containerPort: 30080   # ArgoCD HTTP
+            hostPort: 30080
+          - containerPort: 30443   # ArgoCD HTTPS
+            hostPort: 30443
+          - containerPort: 30300   # Grafana
+            hostPort: 30300
+          - containerPort: 30081   # Traefik HTTP
+            hostPort: 30081
+          - containerPort: 30444   # Traefik HTTPS
+            hostPort: 30444
+          - containerPort: 31235   # Hubble UI
+            hostPort: 31235
+          - containerPort: 30090   # Prometheus
+            hostPort: 30090
+          - containerPort: 30093   # Alertmanager
+            hostPort: 30093
+      - role: worker
+      - role: worker
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Service Mesh (Istio)
+
+### Ambient Mode
+
+Full-bootstrap installs Istio in **ambient mode**, which:
+
+- **No sidecars** - Reduces resource overhead
+- **Transparent encryption** - mTLS without modifying pods
+- **Layer 4 + Layer 7** - Network and application-level policies
+- **Gateway API** - Modern ingress configuration
+
+### Installation
+
+Istio is installed via `istio-install.sh` during Phase 2:
+
+```bash
+bash "${SCRIPT_DIR}/istio-install.sh"
+```
+
+## GitOps (ArgoCD)
+
+### Features
+
+- **Automated sync** - Deploys applications from Git
+- **Multi-environment** - Manages dev/staging/prod
+- **Rollback** - Easy revert to previous versions
+- **Health monitoring** - Application status tracking
+
+### Access
+
+After bootstrap, retrieve the admin password:
+
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d
+```
+
+Access at: `http://localhost:30080`
+
+## Exposed Services
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| ArgoCD | http://localhost:30080 | admin/&lt;secret&gt; |
+| Grafana | http://localhost:30300 | admin/admin |
+| Prometheus | http://localhost:30090 | - |
+| Alertmanager | http://localhost:30093 | - |
+| Hubble UI | http://localhost:31235 | - |
+| Traefik | http://localhost:30081 | - |
+
+<Info>
+The ArgoCD password is displayed at the end of bootstrap and stored in the `argocd-initial-admin-secret` secret.
+</Info>
+
+## Performance
+
+<CardGroup cols={2}>
+  <Card title="Cold Start" icon="snowflake">
+    ~250s full cluster build
+  </Card>
+  <Card title="Warm Start" icon="fire">
+    Instant if no changes
+  </Card>
+  <Card title="Manifest Changes" icon="file-edit">
+    Fast reapply only
+  </Card>
+  <Card title="Resource Usage" icon="memory">
+    Highest of all modes
+  </Card>
+</CardGroup>
+
+## Warm Reapply Logic
+
+When manifests change but cluster config is unchanged:
+
+```bash
+# From full-bootstrap.sh:275-286
+_warm_reapply() {
+  echo "=== Warm reapply: manifests changed ==="
+  bash "${SCRIPT_DIR}/gen-manifests.sh"
+
+  _step_argocd_apply
+  _step_observability
+  _step_postgresql_apply
+  _step_cloudflared
+  _step_wait_all
+
+  _save_hashes
+  echo "=== Warm reapply complete ==="
+}
+```
+
+This skips:
+- Cluster creation
+- Image pulling/loading
+- Cilium installation
+- Istio installation
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Full-Stack Validation" icon="check-double">
+    Test complete production-like environment
+  </Card>
+  <Card title="Service Mesh Testing" icon="mesh">
+    Validate Istio policies and mTLS
+  </Card>
+  <Card title="GitOps Workflows" icon="git">
+    Test ArgoCD deployments and sync
+  </Card>
+  <Card title="Multi-Node Testing" icon="server">
+    Validate distributed workloads
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+After full-bootstrap:
+
+<Steps>
+  <Step title="Access ArgoCD">
+    Log in to ArgoCD and sync applications
+    ```bash
+    open http://localhost:30080
+    ```
+  </Step>
+  <Step title="Monitor with Grafana">
+    View metrics and dashboards
+    ```bash
+    open http://localhost:30300
+    ```
+  </Step>
+  <Step title="Check Hubble">
+    Visualize network traffic
+    ```bash
+    open http://localhost:31235
+    ```
+  </Step>
+</Steps>
+
+## Comparison
+
+See the [Bootstrap Mode Comparison](/bootstrap/comparison) to understand when to use full-bootstrap vs other modes.

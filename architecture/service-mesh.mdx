@@ -1,0 +1,546 @@
+---
+title: Service Mesh Architecture
+description: Istio ambient mode for L7 traffic management without sidecars
+---
+
+The platform uses [Istio](https://istio.io/) in ambient mode to provide Layer 7 traffic management, mTLS encryption, and security policies without the overhead of sidecar proxies.
+
+## Why Istio Ambient Mode?
+
+Ambient mode is a sidecar-less service mesh architecture introduced in Istio 1.15+:
+
+**Traditional Sidecar Model:**
+- One Envoy proxy per pod
+- ~100-200 MB memory per proxy
+- Init containers and pod mutation required
+- Restart app pods to update proxy
+
+**Ambient Mode:**
+- Shared ztunnel DaemonSet (L4)
+- Optional waypoint proxies (L7) only where needed
+- No pod mutation or restarts
+- 50-80% less resource usage
+
+### Benefits
+
+- **Lower overhead**: Shared infrastructure instead of per-pod proxies
+- **Easier adoption**: Gradually enable L7 features per namespace
+- **Simpler operations**: No sidecar injection or lifecycle management
+- **Faster updates**: Update mesh without touching application pods
+- **Better compatibility**: No interference with init containers or security contexts
+
+## Ambient Architecture
+
+Ambient mode consists of two layers:
+
+### Layer 4: Secure Overlay (ztunnel)
+
+```
+Pod A (no proxy) → ztunnel DaemonSet → mTLS → ztunnel DaemonSet → Pod B (no proxy)
+```
+
+**ztunnel** (zero-trust tunnel):
+- Runs as DaemonSet on every node
+- Intercepts all pod traffic via iptables redirection
+- Establishes mTLS between nodes
+- Provides L4 metrics and telemetry
+- Zero configuration required
+
+**Capabilities:**
+- Automatic mutual TLS
+- L4 authorization policies
+- Connection-level metrics
+- Identity-based routing
+
+### Layer 7: Waypoint Proxies (optional)
+
+```
+Pod A → ztunnel → Waypoint Proxy → ztunnel → Pod B
+                     ↑
+              L7 policies applied here
+```
+
+**Waypoint Proxy**:
+- Full Envoy proxy with all L7 features
+- Deployed per namespace or per service account
+- Handles HTTP routing, retries, circuit breaking, JWT auth
+- Only used when L7 features are needed
+
+**Capabilities:**
+- HTTP routing and URL rewriting
+- Retry logic and timeouts
+- Circuit breaking and outlier detection
+- JWT validation and authorization
+- Request/response transformation
+- Advanced metrics and distributed tracing
+
+## Installation
+
+Istio is installed via `istioctl` with the ambient profile:
+
+```bash
+# scripts/istio-install.sh
+
+# Install Gateway API CRDs (required for ambient mode)
+kubectl apply --server-side=true -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.0/standard-install.yaml
+
+# Install Istio with ambient profile
+istioctl install --set profile=ambient --skip-confirmation \
+  --set meshConfig.enableTracing=true \
+  --set "meshConfig.extensionProviders[0].name=otel-tracing" \
+  --set "meshConfig.extensionProviders[0].opentelemetry.service=otel-collector.observability.svc.cluster.local" \
+  --set "meshConfig.extensionProviders[0].opentelemetry.port=4317"
+```
+
+### Configuration Options
+
+| Setting | Value | Purpose |
+|---------|-------|----------|
+| `profile` | `ambient` | Enable ambient mode architecture |
+| `meshConfig.enableTracing` | `true` | Send traces to telemetry backend |
+| `extensionProviders[0].name` | `otel-tracing` | Reference name for tracing provider |
+| `extensionProviders[0].opentelemetry.service` | `otel-collector.observability.svc.cluster.local` | OTel Collector endpoint |
+| `extensionProviders[0].opentelemetry.port` | `4317` | OTLP gRPC port |
+
+## Namespace Enrollment
+
+To enable ambient mode for a namespace, apply the `istio.io/dataplane-mode=ambient` label:
+
+```bash
+# Enable ambient mode for microservices namespace
+kubectl label namespace microservices istio.io/dataplane-mode=ambient --overwrite
+```
+
+This activates:
+- ztunnel traffic interception for all pods
+- Automatic mTLS between services
+- L4 telemetry collection
+
+**No pod restarts required!** Existing pods are automatically enrolled.
+
+## Waypoint Proxy Deployment
+
+For L7 capabilities, deploy a waypoint proxy:
+
+```bash
+# Deploy waypoint for entire namespace
+istioctl waypoint apply -n microservices --enroll-namespace --wait
+```
+
+**What this does:**
+1. Creates a Kubernetes Gateway resource named `waypoint`
+2. Deploys a shared Envoy proxy in the namespace
+3. Configures routing to send traffic through the waypoint
+4. Enables L7 policy enforcement
+
+### Waypoint Scope
+
+You can scope waypoint proxies differently:
+
+```bash
+# Per-namespace waypoint (default)
+istioctl waypoint apply -n microservices --enroll-namespace
+
+# Per-service-account waypoint (more granular)
+istioctl waypoint apply -n microservices --service-account my-sa
+```
+
+## Traffic Management
+
+With waypoint proxies deployed, you can use Istio's full L7 capabilities.
+
+### Retry Policy
+
+Automatically retry failed requests:
+
+```yaml
+# istio/retry-policy.yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: greeter-retry
+  namespace: microservices
+spec:
+  hosts:
+    - greeter-service
+  http:
+    - route:
+        - destination:
+            host: greeter-service
+            port:
+              number: 80
+      retries:
+        attempts: 3
+        perTryTimeout: 2s
+        retryOn: connect-failure,refused-stream,unavailable,cancelled,retriable-status-codes
+```
+
+**Features:**
+- `attempts`: Maximum retry attempts
+- `perTryTimeout`: Timeout for each attempt
+- `retryOn`: Conditions that trigger retries
+
+### Circuit Breaking
+
+Prevent cascading failures:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: circuit-breaker
+  namespace: microservices
+spec:
+  host: backend-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 2
+    outlierDetection:
+      consecutiveErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+```
+
+### Load Balancing
+
+Control traffic distribution:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: load-balancing
+spec:
+  host: api-service
+  trafficPolicy:
+    loadBalancer:
+      consistentHash:
+        httpHeaderName: x-user-id  # Sticky sessions by header
+```
+
+**Algorithms:**
+- `ROUND_ROBIN` (default)
+- `LEAST_REQUEST`
+- `RANDOM`
+- `CONSISTENT_HASH` (sticky sessions)
+
+## Security Policies
+
+Istio provides fine-grained security controls at the waypoint proxy.
+
+### JWT Authentication
+
+Validate JSON Web Tokens from an auth service:
+
+```yaml
+# istio/authorization-policy.yaml
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: jwt-auth
+  namespace: microservices
+spec:
+  targetRefs:
+    - kind: Gateway
+      group: gateway.networking.k8s.io
+      name: waypoint
+  jwtRules:
+    - issuer: "auth-service"
+      jwksUri: "http://auth-service.microservices.svc.cluster.local:8090/.well-known/jwks.json"
+      forwardOriginalToken: true
+```
+
+**Behavior:**
+- Invalid tokens → Request rejected (401)
+- Missing tokens → Allowed through (authorization policy handles this)
+- Valid tokens → Extracted claims available for authorization
+
+### Authorization Policy
+
+Enforce access control based on JWT claims:
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: require-jwt-or-public
+  namespace: microservices
+spec:
+  targetRefs:
+    - kind: Gateway
+      group: gateway.networking.k8s.io
+      name: waypoint
+  action: ALLOW
+  rules:
+    # Rule 1: Valid JWT → allow all paths
+    - from:
+        - source:
+            requestPrincipals: ["*"]
+    # Rule 2: Public paths → allow without JWT
+    - to:
+        - operation:
+            paths: ["/auth/*", "/healthz", "/.well-known/*"]
+    # Rule 3: Service-to-service → allow without JWT
+    - from:
+        - source:
+            principals: ["cluster.local/ns/microservices/sa/*"]
+```
+
+**Semantics:**
+- Multiple rules in ALLOW policy → OR logic (any match allows)
+- Multiple conditions in one rule → AND logic (all must match)
+
+### mTLS Enforcement
+
+While ambient mode enables mTLS by default, you can enforce strict mode:
+
+```yaml
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls
+  namespace: microservices
+spec:
+  mtls:
+    mode: STRICT  # Reject non-mTLS traffic
+```
+
+## Observability Integration
+
+Istio sends telemetry to OpenTelemetry Collector.
+
+### Tracing Configuration
+
+The Telemetry API enables distributed tracing:
+
+```yaml
+# istio/telemetry.yaml
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-tracing
+  namespace: istio-system
+spec:
+  tracing:
+    - providers:
+        - name: otel-tracing  # References extensionProvider from install
+      randomSamplingPercentage: 100  # Sample all requests (dev only)
+```
+
+**What this enables:**
+- Automatic span creation for HTTP requests
+- Trace context propagation (W3C Trace Context)
+- Integration with Tempo for storage
+- Trace-to-logs correlation in Grafana
+
+### Metrics Collection
+
+Istio exports Prometheus metrics automatically:
+
+```
+# Request metrics
+istio_requests_total{...}
+istio_request_duration_milliseconds{...}
+istio_request_bytes{...}
+istio_response_bytes{...}
+
+# TCP connection metrics
+istio_tcp_connections_opened_total{...}
+istio_tcp_connections_closed_total{...}
+istio_tcp_received_bytes_total{...}
+istio_tcp_sent_bytes_total{...}
+```
+
+**Labels include:**
+- `source_workload`, `destination_workload`
+- `request_protocol` (http, grpc, tcp)
+- `response_code` (200, 404, 500, etc.)
+- `connection_security_policy` (mutual_tls, none)
+
+## Traffic Flow Examples
+
+### Without Waypoint (L4 Only)
+
+```
+frontend-pod (10.244.1.5:45678)
+  ↓
+Cilium routing
+  ↓
+ztunnel (control-plane node)
+  ↓ (mTLS over network)
+ztunnel (worker node)
+  ↓
+Cilium routing
+  ↓
+backend-pod (10.244.2.7:8080)
+```
+
+**Capabilities:**
+- Automatic mTLS
+- L4 authorization policies
+- Connection metrics
+
+### With Waypoint (L4 + L7)
+
+```
+frontend-pod (10.244.1.5:45678)
+  ↓
+ztunnel (control-plane node)
+  ↓ (mTLS)
+Waypoint Proxy (10.244.1.10:15080)
+  ↓ (L7 processing: JWT auth, retries, routing)
+ztunnel (waypoint node)
+  ↓ (mTLS)
+ztunnel (worker node)
+  ↓
+backend-pod (10.244.2.7:8080)
+```
+
+**Additional capabilities:**
+- JWT validation
+- HTTP routing and URL rewriting
+- Retry logic and circuit breaking
+- Request/response metrics and tracing
+
+## Compatibility with Cilium
+
+Istio and Cilium are configured to work together:
+
+### Cilium Settings for Istio
+
+```yaml
+# From scripts/cilium-install.sh
+cni.exclusive: false           # Allow Istio CNI to chain
+socketLB.hostNamespaceOnly: true  # Don't interfere with ztunnel
+kubeProxyReplacement: false    # Use kube-proxy for compatibility
+```
+
+### Istio CNI Plugin
+
+Istio's CNI plugin sets up iptables rules for traffic redirection:
+
+```bash
+# Redirect all outbound TCP to ztunnel port 15001
+iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 15001
+
+# Redirect all inbound TCP to ztunnel port 15008
+iptables -t nat -A PREROUTING -p tcp -j REDIRECT --to-port 15008
+```
+
+Cilium sees traffic after these redirections, so both layers cooperate seamlessly.
+
+## Troubleshooting
+
+### Check Istio Installation
+
+```bash
+# Verify control plane
+istioctl verify-install
+
+# Check ztunnel status
+kubectl get pods -n istio-system -l app=ztunnel
+
+# Check waypoint status
+kubectl get gateway -n microservices
+kubectl get pods -n microservices -l gateway.istio.io/managed=istio.io-mesh-controller
+```
+
+### Debug Ambient Mode
+
+```bash
+# Check if namespace is enrolled
+kubectl get namespace microservices -o jsonpath='{.metadata.labels}'
+
+# View ztunnel logs
+kubectl logs -n istio-system ds/ztunnel -f
+
+# Check waypoint enrollment
+istioctl waypoint list -n microservices
+```
+
+### Trace Request Path
+
+```bash
+# Enable debug logging on ztunnel
+istioctl proxy-config log ztunnel-<pod> --level debug
+
+# View captured requests
+kubectl logs -n istio-system ztunnel-<pod> | grep <pod-ip>
+
+# Check waypoint proxy access logs
+kubectl logs -n microservices <waypoint-pod> -f
+```
+
+### Authorization Policy Issues
+
+```bash
+# Check policy status
+kubectl get authorizationpolicy -n microservices
+
+# Test with dry-run mode
+kubectl create -f policy.yaml --dry-run=server
+
+# View denials in waypoint logs
+kubectl logs -n microservices <waypoint-pod> | grep RBAC
+```
+
+### mTLS Verification
+
+```bash
+# Check mTLS status for a workload
+istioctl experimental describe pod <pod-name> -n microservices
+
+# Verify certificates
+istioctl proxy-config secret ztunnel-<pod> -n istio-system
+
+# Test mTLS connectivity
+kubectl exec <pod> -- curl -v http://backend-service:8080
+```
+
+## Performance Considerations
+
+### Resource Usage
+
+**ztunnel** (per node):
+- CPU: ~50-100m idle, ~500m under load
+- Memory: ~50-100 MB
+
+**Waypoint Proxy** (per namespace):
+- CPU: ~100-200m idle, ~1 core under load
+- Memory: ~200-400 MB
+
+**Comparison to sidecar model:**
+- 10 pods × 100 MB sidecar = 1 GB total
+- Ambient: 1 ztunnel (100 MB) + 1 waypoint (300 MB) = 400 MB total
+- **60% less memory usage**
+
+### Latency Impact
+
+**L4 only (ztunnel):**
+- Overhead: ~0.5-1ms per hop
+- mTLS handshake: ~5-10ms (cached after first request)
+
+**L7 with waypoint:**
+- Additional overhead: ~2-5ms for HTTP processing
+- Comparable to sidecar latency
+
+**Recommendations:**
+- Use L4 for internal service-to-service calls
+- Use L7 only at ingress or where advanced features are needed
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Observability" icon="chart-line" href="/architecture/observability">
+    Learn how Istio integrates with Prometheus, Tempo, and Grafana
+  </Card>
+  <Card title="GitOps" icon="code-branch" href="/architecture/gitops">
+    Explore how Istio configs are managed via ArgoCD and Nixidy
+  </Card>
+</CardGroup>

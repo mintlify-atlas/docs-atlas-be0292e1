@@ -1,0 +1,618 @@
+---
+title: Troubleshooting
+description: Debug Kubernetes issues and common problems
+---
+
+## Quick Debug Command
+
+The `debug-k8s` command provides instant cluster health overview:
+
+```bash
+debug-k8s
+```
+
+**Output** (devenv.nix:130-135):
+
+```
+=== Pod status ===
+NAMESPACE       NAME                              READY   STATUS    RESTARTS   AGE
+observability   grafana-abc123                    1/1     Running   0          5m
+observability   prometheus-xyz789                 1/1     Running   0          5m
+...
+
+=== Recent events ===
+observability   5m   Normal   Scheduled   pod/grafana-abc123   Successfully assigned
+observability   5m   Normal   Pulling     pod/grafana-abc123   Pulling image
+...
+```
+
+**What it shows**:
+1. All pods across all namespaces
+2. Last 10 events sorted by timestamp
+3. Quick way to spot crashes, image pull failures, scheduling issues
+
+## Common Issues
+
+### Cluster Won't Start
+
+**Symptoms**:
+- `kubectl` commands hang
+- `cluster-start` times out
+- "connection refused" errors
+
+**Diagnosis**:
+
+```bash
+# Check Docker containers
+docker ps -a --filter "label=io.x-k8s.kind.cluster=microservice-infra"
+
+# Check container logs
+docker logs microservice-infra-control-plane
+
+# Check API server health
+curl -k https://localhost:6443/healthz
+```
+
+**Solutions**:
+
+1. **Restart cluster**:
+   ```bash
+   cluster-stop
+   cluster-start
+   ```
+
+2. **Full rebuild**:
+   ```bash
+   cluster-down
+   bootstrap --clean
+   ```
+
+3. **Check Docker daemon**:
+   ```bash
+   systemctl status docker
+   docker info
+   ```
+
+### Pod Stuck in Pending
+
+**Symptoms**:
+- Pod shows `Pending` status
+- Never transitions to `Running`
+
+**Diagnosis**:
+
+```bash
+# Describe pod to see events
+kubectl describe pod <pod-name> -n <namespace>
+
+# Check events specifically
+kubectl get events -n <namespace> --sort-by=.lastTimestamp
+
+# Check node resources
+kubectl top nodes
+kubectl describe nodes
+```
+
+**Common causes**:
+
+1. **Insufficient resources**:
+   ```
+   Warning  FailedScheduling  pod/myapp  0/1 nodes available: Insufficient cpu
+   ```
+   
+   **Solution**: Reduce resource requests or add nodes
+
+2. **Image pull failure**:
+   ```
+   Warning  Failed  pod/myapp  Failed to pull image "myimage:latest"
+   ```
+   
+   **Solution**: Check image name, load into Kind:
+   ```bash
+   docker pull myimage:latest
+   kind load docker-image myimage:latest --name microservice-infra
+   ```
+
+3. **PVC not bound**:
+   ```
+   Warning  FailedMount  pod/myapp  persistentvolumeclaim "data" not found
+   ```
+   
+   **Solution**: Check PVC status:
+   ```bash
+   kubectl get pvc -n <namespace>
+   kubectl describe pvc <pvc-name> -n <namespace>
+   ```
+
+### Pod CrashLoopBackOff
+
+**Symptoms**:
+- Pod status: `CrashLoopBackOff`
+- Restart count increasing
+
+**Diagnosis**:
+
+```bash
+# Check logs from current container
+kubectl logs <pod-name> -n <namespace>
+
+# Check logs from previous crash
+kubectl logs <pod-name> -n <namespace> --previous
+
+# Follow logs in real-time
+kubectl logs <pod-name> -n <namespace> -f
+
+# Check container exit code
+kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.status.containerStatuses[0].lastState.terminated}'
+```
+
+**Common causes**:
+
+1. **Application error**:
+   - Check logs for stack traces
+   - Verify configuration (env vars, secrets)
+   - Test application locally
+
+2. **Missing dependencies**:
+   - Database not ready
+   - Secret not created
+   
+   **Solution**: Add init containers or readiness probes
+
+3. **Liveness probe failing**:
+   ```yaml
+   livenessProbe:
+     httpGet:
+       path: /health
+       port: 8080
+     initialDelaySeconds: 60  # Give app time to start
+   ```
+
+### Image Pull Errors
+
+**Symptoms**:
+- `ErrImagePull` or `ImagePullBackOff`
+- Pod can't download container image
+
+**Diagnosis**:
+
+```bash
+# Describe pod for full error
+kubectl describe pod <pod-name> -n <namespace>
+
+# Check image name
+kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[*].image}'
+```
+
+**Solutions**:
+
+1. **Load local image into Kind**:
+   ```bash
+   docker pull <image:tag>
+   kind load docker-image <image:tag> --name microservice-infra
+   ```
+
+2. **Fix image name**:
+   - Check for typos
+   - Verify tag exists
+   - Ensure registry is accessible
+
+3. **Use custom OTel Collector** (if applicable):
+   ```bash
+   load-otel-collector-image
+   ```
+
+### Service Not Reachable
+
+**Symptoms**:
+- Can't access service via NodePort or ClusterIP
+- Connection timeout or refused
+
+**Diagnosis**:
+
+```bash
+# Check service
+kubectl get svc -n <namespace>
+kubectl describe svc <service-name> -n <namespace>
+
+# Verify endpoints
+kubectl get endpoints <service-name> -n <namespace>
+
+# Test from within cluster
+kubectl run curl --image=curlimages/curl -it --rm -- curl http://<service-name>.<namespace>:8080
+```
+
+**Common causes**:
+
+1. **No endpoints** (no pods match selector):
+   ```bash
+   # Check selector
+   kubectl get svc <service-name> -n <namespace> -o jsonpath='{.spec.selector}'
+   
+   # Check pod labels
+   kubectl get pods -n <namespace> --show-labels
+   ```
+
+2. **Wrong port**:
+   - Verify service port matches container port
+   - Check NodePort range (30000-32000)
+
+3. **Pod not ready**:
+   ```bash
+   kubectl get pods -n <namespace>
+   # If 0/1 READY, check readiness probe
+   ```
+
+### DNS Resolution Failing
+
+**Symptoms**:
+- "Name or service not known"
+- Can't resolve service names
+
+**Diagnosis**:
+
+```bash
+# Check CoreDNS pods
+kubectl get pods -n kube-system -l k8s-app=kube-dns
+
+# Test DNS from pod
+kubectl run -it --rm debug --image=busybox --restart=Never -- nslookup kubernetes.default
+
+# Check CoreDNS logs
+kubectl logs -n kube-system -l k8s-app=kube-dns
+```
+
+**Solutions**:
+
+1. **Restart CoreDNS**:
+   ```bash
+   kubectl rollout restart deployment/coredns -n kube-system
+   ```
+
+2. **Verify DNS service**:
+   ```bash
+   kubectl get svc -n kube-system kube-dns
+   ```
+
+3. **Check pod DNS config**:
+   ```bash
+   kubectl exec <pod-name> -n <namespace> -- cat /etc/resolv.conf
+   ```
+
+### Persistent Volume Issues
+
+**Symptoms**:
+- PVC stuck in `Pending`
+- "no persistent volumes available"
+
+**Diagnosis**:
+
+```bash
+# Check PVC status
+kubectl get pvc -A
+
+# Describe PVC
+kubectl describe pvc <pvc-name> -n <namespace>
+
+# Check available PVs
+kubectl get pv
+```
+
+**Solutions**:
+
+1. **For Kind (hostPath)**:
+   - Volumes are automatically provisioned
+   - Check storage class:
+     ```bash
+     kubectl get storageclass
+     kubectl get pvc <pvc-name> -n <namespace> -o jsonpath='{.spec.storageClassName}'
+     ```
+
+2. **Create manual PV** (if needed):
+   ```yaml
+   apiVersion: v1
+   kind: PersistentVolume
+   metadata:
+     name: manual-pv
+   spec:
+     capacity:
+       storage: 10Gi
+     accessModes:
+       - ReadWriteOnce
+     hostPath:
+       path: /data/manual-pv
+   ```
+
+### Manifest Apply Failures
+
+**Symptoms**:
+- `kubectl apply` returns error
+- Resources not created/updated
+
+**Diagnosis**:
+
+```bash
+# Dry-run to check validity
+kubectl apply --dry-run=client -f manifests/myapp/
+
+# Server-side dry-run
+kubectl apply --dry-run=server -f manifests/myapp/
+
+# Check resource validation
+kubectl explain <resource>.<field>
+```
+
+**Common causes**:
+
+1. **CRD not installed**:
+   ```
+   error: unable to recognize "file.yaml": no matches for kind "Prometheus"
+   ```
+   
+   **Solution**: Apply CRDs first:
+   ```bash
+   kubectl apply -f manifests/kube-prometheus-stack/CustomResourceDefinition-*.yaml
+   ```
+
+2. **Field immutable**:
+   ```
+   The Service "myapp" is invalid: spec.clusterIP: Invalid value: ""
+   ```
+   
+   **Solution**: Delete and recreate:
+   ```bash
+   kubectl delete svc myapp -n <namespace>
+   kubectl apply -f manifests/myapp/Service-myapp.yaml
+   ```
+
+3. **Server-side apply conflict**:
+   ```
+   Apply failed with 1 conflict
+   ```
+   
+   **Solution**: Force conflicts:
+   ```bash
+   kubectl apply -f file.yaml --server-side --force-conflicts
+   ```
+
+## Advanced Debugging
+
+### Interactive Pod Debugging
+
+Create debug pod in same namespace:
+
+```bash
+# Alpine with network tools
+kubectl run debug -it --rm --image=alpine -n <namespace> -- sh
+
+# Inside pod:
+apk add curl bind-tools
+nslookup myservice
+curl http://myservice:8080/health
+```
+
+### Exec into Running Pod
+
+```bash
+# Get shell
+kubectl exec -it <pod-name> -n <namespace> -- /bin/sh
+
+# Run single command
+kubectl exec <pod-name> -n <namespace> -- env | grep DATABASE
+
+# For multi-container pod
+kubectl exec -it <pod-name> -n <namespace> -c <container-name> -- /bin/sh
+```
+
+### Port Forward for Local Access
+
+```bash
+# Forward pod port to localhost
+kubectl port-forward pod/<pod-name> 8080:8080 -n <namespace>
+
+# Forward service
+kubectl port-forward svc/<service-name> 8080:80 -n <namespace>
+
+# Then access: http://localhost:8080
+```
+
+### Copy Files To/From Pod
+
+```bash
+# Copy from pod
+kubectl cp <namespace>/<pod-name>:/path/to/file ./local-file
+
+# Copy to pod
+kubectl cp ./local-file <namespace>/<pod-name>:/path/to/file
+```
+
+### Analyze Resource Usage
+
+```bash
+# Node resource usage
+kubectl top nodes
+
+# Pod resource usage
+kubectl top pods -A --sort-by=memory
+kubectl top pods -A --sort-by=cpu
+
+# Specific namespace
+kubectl top pods -n observability
+```
+
+### Watch Resources in Real-Time
+
+```bash
+# Watch pod status
+kubectl get pods -n <namespace> -w
+
+# Watch events
+kubectl get events -n <namespace> -w --sort-by=.lastTimestamp
+
+# Watch with custom columns
+kubectl get pods -n <namespace> -w -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount
+```
+
+## Bootstrap-Specific Issues
+
+### Bootstrap Hangs
+
+**Diagnosis**:
+
+```bash
+# Check which step is hanging
+kubectl get pods -A
+
+# Check events
+kubectl get events -A --sort-by=.lastTimestamp | tail -20
+
+# Check bootstrap state
+ls -la .bootstrap-state/
+cat .bootstrap-state/cluster
+cat .bootstrap-state/manifest
+```
+
+**Solutions**:
+
+1. **Kill and restart**:
+   ```bash
+   # Ctrl+C to stop
+   bootstrap
+   ```
+
+2. **Clean bootstrap**:
+   ```bash
+   bootstrap --clean
+   ```
+
+3. **Manual cleanup**:
+   ```bash
+   cluster-down
+   rm -rf .bootstrap-state/
+   docker system prune -f
+   bootstrap
+   ```
+
+### Warm Cluster Not Detecting Changes
+
+**Symptoms**:
+- Changed manifests not applied
+- "All good" message but resources outdated
+
+**Diagnosis**:
+
+```bash
+# Check stored hashes
+cat .bootstrap-state/manifest
+
+# Compute current hash
+find manifests-result -type f | sort | xargs cat | shasum -a 256
+```
+
+**Solution**: Force regeneration
+
+```bash
+bootstrap --clean
+```
+
+### Garage Setup Fails
+
+**Symptoms**:
+- Bootstrap fails at "Running Garage setup"
+- Loki/Tempo can't connect to storage
+
+**Diagnosis**:
+
+```bash
+# Check Garage pods
+kubectl get pods -n storage
+
+# Check Garage logs
+kubectl logs -n storage -l app.kubernetes.io/name=garage
+
+# Test Garage API
+kubectl exec -n storage -it <garage-pod> -- garage status
+```
+
+**Solution**: Re-run setup
+
+```bash
+bash scripts/garage-setup.sh
+```
+
+## Log Analysis
+
+### Grep Logs for Errors
+
+```bash
+# All pods in namespace
+kubectl logs -n <namespace> --all-containers=true | grep -i error
+
+# Specific label
+kubectl logs -n <namespace> -l app=myapp --tail=100 | grep -i "exception\|error\|fatal"
+```
+
+### Follow Multiple Pods
+
+```bash
+# All pods matching label
+kubectl logs -n <namespace> -l app=myapp -f --max-log-requests=10
+```
+
+### Export Logs for Analysis
+
+```bash
+# Single pod
+kubectl logs <pod-name> -n <namespace> > pod.log
+
+# All pods
+for pod in $(kubectl get pods -n <namespace> -o name); do
+  kubectl logs -n <namespace> $pod > "${pod##*/}.log"
+done
+```
+
+## Getting Help
+
+### Collect Diagnostic Info
+
+```bash
+# Cluster info
+kubectl cluster-info dump > cluster-dump.txt
+
+# All resources
+kubectl get all -A > all-resources.txt
+
+# Events
+kubectl get events -A --sort-by=.lastTimestamp > events.txt
+
+# Node status
+kubectl describe nodes > nodes.txt
+```
+
+### Check Component Versions
+
+```bash
+# Kubernetes version
+kubectl version
+
+# Kind version
+kind version
+
+# Cilium version (if installed)
+cilium version
+
+# Helm releases
+helm list -A
+```
+
+### Useful kubectl Plugins
+
+```bash
+# Install krew (kubectl plugin manager)
+# https://krew.sigs.k8s.io/docs/user-guide/setup/install/
+
+# Install useful plugins
+kubectl krew install tree      # View resources as tree
+kubectl krew install neat      # Clean up resource output
+kubectl krew install tail      # Tail logs from multiple pods
+```

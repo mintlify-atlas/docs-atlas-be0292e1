@@ -1,0 +1,300 @@
+---
+title: Garage
+description: Lightweight S3-compatible object storage for Loki and Tempo
+---
+
+## Overview
+
+Garage provides S3-compatible object storage for the observability stack. It serves as the backend for Loki (log chunks) and Tempo (trace blocks), enabling persistent storage without external dependencies.
+
+## Configuration
+
+### Nixidy Module (`nixidy/env/local/garage.nix`)
+
+```nix
+applications.garage = {
+  namespace = "storage";
+  createNamespace = true;
+  
+  resources = {
+    configMaps.garage-config = {
+      data."garage.toml" = ''
+        metadata_dir = "/var/lib/garage/meta"
+        data_dir = "/var/lib/garage/data"
+        db_engine = "sqlite"
+        replication_factor = 1
+        
+        rpc_bind_addr = "[::]:3901"
+        rpc_public_addr = "127.0.0.1:3901"
+        rpc_secret = "0000...0000"  # 64-char hex string
+        
+        [s3_api]
+        s3_region = "garage"
+        api_bind_addr = "[::]:3900"
+        root_domain = ".s3.garage.localhost"
+        
+        [admin]
+        api_bind_addr = "[::]:3903"
+        admin_token = "admin"
+        metrics_token = "metrics"
+      '';
+    };
+  };
+};
+```
+
+### Storage Configuration
+
+- **Database**: SQLite (single-node deployment)
+- **Replication factor**: 1 (no redundancy in local dev)
+- **Metadata dir**: `/var/lib/garage/meta` (PV)
+- **Data dir**: `/var/lib/garage/data` (PV)
+
+## Deployment
+
+Garage runs as a StatefulSet:
+
+```yaml
+image: dxflrs/garage:v1.1.0
+replicas: 1
+volumeClaims:
+  - meta: 512Mi
+  - data: 4Gi
+```
+
+### Persistent Volumes
+
+| Volume | Size | Purpose |
+|---|---|---|
+| `meta` | 512Mi | Cluster metadata and object index |
+| `data` | 4Gi | Object data (chunks and blocks) |
+
+## Service Ports
+
+Garage exposes three services:
+
+| Port | Protocol | Purpose |
+|---|---|---|
+| 3900 | TCP | S3 API (object operations) |
+| 3901 | TCP | RPC (cluster communication) |
+| 3903 | TCP | Admin API (management, metrics) |
+
+### Service Endpoint
+
+- **S3 API**: `http://garage.storage:3900`
+- **Admin API**: `http://garage.storage:3903`
+- **Namespace**: `storage`
+
+## Setup Process
+
+Garage requires initial configuration via `garage-setup.sh`:
+
+### 1. Apply Cluster Layout
+
+```bash
+NODE_ID=$(garage_exec status | grep -oE '[a-f0-9]{16}' | head -1)
+garage_exec layout assign "$NODE_ID" -z dc1 -c 4G
+garage_exec layout apply --version "$LAYOUT_VER"
+```
+
+This assigns 4GB capacity to the single node in zone `dc1`.
+
+### 2. Create Access Key
+
+```bash
+garage_exec key create garage-o11y-key
+```
+
+Outputs:
+- **Access Key**: `GK...` (20+ chars)
+- **Secret Key**: Random string
+
+### 3. Create Buckets
+
+```bash
+for BUCKET in loki-chunks tempo-traces; do
+  garage_exec bucket create "$BUCKET"
+  garage_exec bucket allow "$BUCKET" --read --write --key "$ACCESS_KEY"
+done
+```
+
+Buckets:
+- **`loki-chunks`** - Loki log storage
+- **`tempo-traces`** - Tempo trace storage
+
+### 4. Create Kubernetes Secrets
+
+```bash
+kubectl create secret generic garage-s3-credentials \
+  --namespace=observability \
+  --from-literal=AWS_ACCESS_KEY_ID="$ACCESS_KEY" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="$SECRET_KEY"
+```
+
+Secret is created in:
+- `storage` namespace (for Garage itself)
+- `observability` namespace (for Loki and Tempo)
+
+### 5. Encrypt Credentials (SOPS)
+
+```bash
+sops --encrypt --in-place secrets/garage.yaml
+```
+
+Credentials are encrypted with SOPS for GitOps reproducibility.
+
+## Health Checks
+
+### Readiness Probe
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3903
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+### Liveness Probe
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3903
+  initialDelaySeconds: 10
+  periodSeconds: 30
+```
+
+Both probes use the admin API health endpoint.
+
+## Resource Limits
+
+```yaml
+requests:
+  cpu: 50m
+  memory: 128Mi
+limits:
+  cpu: 500m
+  memory: 512Mi
+```
+
+Garage is lightweight and suitable for local development workloads.
+
+## Integration
+
+### Loki
+
+Loki uses Garage for log chunk storage:
+
+```yaml
+storage:
+  type: s3
+  bucketNames:
+    chunks: loki-chunks
+  s3:
+    endpoint: http://garage.storage:3900
+    region: garage
+    s3forcepathstyle: true
+```
+
+**Credentials**: `garage-s3-credentials` secret injected via `extraEnvFrom`
+
+### Tempo
+
+Tempo uses Garage for trace block storage:
+
+```yaml
+storage:
+  trace:
+    backend: s3
+    s3:
+      endpoint: garage.storage:3900
+      bucket: tempo-traces
+      region: garage
+      forcepathstyle: true
+```
+
+**Credentials**: `garage-s3-credentials` secret injected via `extraEnvFrom`
+
+## S3 Compatibility
+
+Garage implements S3 API:
+
+- **PutObject** - Upload objects
+- **GetObject** - Download objects
+- **DeleteObject** - Remove objects
+- **ListObjects** - List bucket contents
+- **HeadObject** - Get object metadata
+- **MultipartUpload** - Large object uploads
+
+**Path style**: Required (`s3forcepathstyle: true`)
+
+## Admin Operations
+
+### Check Cluster Status
+
+```bash
+kubectl exec -n storage garage-0 -- /garage status
+```
+
+### List Buckets
+
+```bash
+kubectl exec -n storage garage-0 -- /garage bucket list
+```
+
+### View Key Info
+
+```bash
+kubectl exec -n storage garage-0 -- /garage key info <access-key>
+```
+
+### Check Metrics
+
+```bash
+curl -H "Authorization: Bearer metrics" http://garage.storage:3903/metrics
+```
+
+Metrics are Prometheus-compatible.
+
+## Configuration Details
+
+### RPC Settings
+
+```toml
+rpc_bind_addr = "[::]:3901"      # Listen on all interfaces
+rpc_public_addr = "127.0.0.1:3901"  # Single-node cluster
+rpc_secret = "0000...0000"       # Cluster authentication
+```
+
+### S3 Settings
+
+```toml
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+```
+
+### Admin Settings
+
+```toml
+api_bind_addr = "[::]:3903"
+admin_token = "admin"       # Admin API auth
+metrics_token = "metrics"   # Metrics endpoint auth
+```
+
+## Storage Backend
+
+Garage stores objects in two layers:
+
+1. **Metadata** - SQLite database with object index
+2. **Data blocks** - Raw object data on disk
+
+This provides efficient lookups and streaming.
+
+## Related Components
+
+- [Loki](/components/loki) - Log chunk storage client
+- [Tempo](/components/tempo) - Trace block storage client

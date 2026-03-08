@@ -1,0 +1,351 @@
+---
+title: Manifest Management
+description: Generate, watch, and fix Kubernetes manifests from nixidy modules
+---
+
+Manifest management commands handle the generation and maintenance of Kubernetes manifests from nixidy modules.
+
+## gen-manifests
+
+Regenerate nixidy manifests into the `manifests/` directory.
+
+### Syntax
+
+```bash
+gen-manifests
+```
+
+### Behavior
+
+1. Builds nixidy environment package using Nix
+2. Outputs result to `manifests-result/` symlink
+3. Copies manifests to `manifests/` directory
+4. Makes manifests writable (`chmod -R u+w`)
+5. Removes ArgoCD self-management application
+6. Shows git diff statistics
+
+### Example
+
+```bash
+# Regenerate manifests
+gen-manifests
+```
+
+### Output
+
+```
+==> Building nixidy manifests...
+==> Copying to manifests/...
+==> Done. manifests/ updated.
+
+ manifests/argocd/Application-argocd.yaml         |  45 +++---
+ manifests/kube-prometheus-stack/Prometheus.yaml  |  12 +-
+ manifests/traefik/Deployment-traefik.yaml        |   8 +-
+ 3 files changed, 42 insertions(+), 23 deletions(-)
+```
+
+### Nixidy Integration
+
+The command builds from the Nix flake:
+
+```bash
+nix build .#legacyPackages.<system>.nixidyEnvs.local.environmentPackage
+```
+
+### Directory Structure
+
+Generated manifests are organized by component:
+
+```
+manifests/
+├── argocd/
+├── cloudflared/
+├── garage/
+├── kube-prometheus-stack/
+├── loki/
+├── otel-collector/
+├── postgresql/
+├── tempo/
+└── traefik/
+```
+
+### Use Cases
+
+- Apply nixidy module changes
+- Regenerate after nix configuration updates
+- Prepare manifests for manual inspection
+- Update cluster after code changes
+
+### Related Commands
+
+- [watch-manifests](#watch-manifests) - Auto-regenerate on changes
+- [fix-chart-hash](#fix-chart-hash) - Fix helm chart hash mismatches
+- [nix-check](/cli/utilities#nix-check) - Validate nix expressions
+
+---
+
+## watch-manifests
+
+Watch nixidy modules for changes and automatically regenerate and apply manifests.
+
+### Syntax
+
+```bash
+watch-manifests
+```
+
+### Behavior
+
+1. Monitors all `.nix` files using `watchexec`
+2. On any change:
+   - Regenerates manifests via `gen-manifests`
+   - Applies manifests to cluster via `kubectl apply`
+3. Restarts on crashes
+4. Runs until interrupted (Ctrl+C)
+
+### Example
+
+```bash
+# Start watching
+watch-manifests
+```
+
+### Output
+
+```
+Watching nixidy modules for changes...
+[Running: bash -lc 'bash scripts/gen-manifests.sh && kubectl apply -f manifests/']
+
+==> Building nixidy manifests...
+==> Done. manifests/ updated.
+
+namespace/observability configured
+prometheus.monitoring.coreos.com/kube-prometheus configured
+grafana.grafana.integreatly.org/grafana configured
+
+[Finished running. Waiting for changes...]
+```
+
+### watchexec Configuration
+
+The command uses:
+
+```bash
+watchexec --exts nix --restart -- bash -lc 'bash scripts/gen-manifests.sh && kubectl apply -f manifests/'
+```
+
+- `--exts nix`: Only watch `.nix` files
+- `--restart`: Kill and restart on new changes
+- Shell invocation: Ensures proper environment loading
+
+### Use Cases
+
+- Rapid nixidy module development
+- Immediate feedback on configuration changes
+- Continuous integration testing
+- Live cluster updates during development
+
+### Best Practices
+
+<Warning>
+This command applies changes immediately to your cluster. Use with caution in shared environments.
+</Warning>
+
+**Recommended workflow:**
+
+1. Run in dedicated terminal window
+2. Edit nixidy modules in your editor
+3. Save file to trigger regeneration
+4. Check cluster state with `kubectl get pods -A`
+5. Stop with Ctrl+C when done
+
+### Related Commands
+
+- [gen-manifests](#gen-manifests) - One-time manifest generation
+- [debug-k8s](/cli/monitoring#debug-k8s) - Check cluster state
+
+---
+
+## fix-chart-hash
+
+Automatically fix empty or mismatched Helm chart hashes in nixidy modules.
+
+### Syntax
+
+```bash
+fix-chart-hash
+```
+
+### Behavior
+
+1. Attempts to build nixidy environment package
+2. If hash mismatch error occurs:
+   - Extracts correct hash from error message
+   - Finds `.nix` files with empty or placeholder `chartHash`
+   - Updates `chartHash` with correct value
+   - Retries build
+3. Repeats until build succeeds or max iterations reached
+4. Maximum 10 iterations
+
+### Example
+
+```bash
+# Fix chart hashes
+fix-chart-hash
+```
+
+### Output
+
+```
+=== Attempt 1/10 ===
+Found correct hash: sha256-abc123def456...
+Updated: nixidy/observability/prometheus-stack.nix
+
+=== Attempt 2/10 ===
+Build succeeded!
+```
+
+### Use Cases
+
+- Adding new Helm charts to nixidy
+- Updating chart versions
+- Fixing hash mismatches after chart updates
+- Bootstrapping new chart configurations
+
+### Hash Patterns
+
+The script fixes these patterns:
+
+```nix
+# Empty hash
+chartHash = "";
+
+# Placeholder hash
+chartHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+```
+
+### Error Handling
+
+```bash
+# If no hash mismatch found
+No hash mismatch found. Build error:
+<error output>
+
+# If no fixable files found
+Could not find a file with empty chartHash to update.
+
+# If max iterations exceeded
+Exceeded max iterations (10). Something is wrong.
+```
+
+### Platform Compatibility
+
+<Note>
+The script uses `sed -i ''` which is macOS-specific. On Linux, this should be `sed -i`.
+</Note>
+
+### Workflow Example
+
+```nix
+// 1. Add new chart with empty hash
+helm.chart "prometheus" {
+  namespace = "observability";
+  chart = "kube-prometheus-stack";
+  repo = "https://prometheus-community.github.io/helm-charts";
+  version = "45.0.0";
+  chartHash = "";  # Empty hash
+}
+```
+
+```bash
+# 2. Run fix script
+fix-chart-hash
+
+# 3. Hash is automatically filled
+```
+
+### Related Commands
+
+- [gen-manifests](#gen-manifests) - Generate manifests after fixing
+- [nix-check](/cli/utilities#nix-check) - Validate nix syntax
+
+---
+
+## Manifest Workflow
+
+### Development Cycle
+
+```bash
+# 1. Edit nixidy modules
+vim nixidy/observability/prometheus-stack.nix
+
+# 2. Fix any chart hash issues
+fix-chart-hash
+
+# 3. Generate manifests
+gen-manifests
+
+# 4. Apply to cluster
+kubectl apply -f manifests/
+```
+
+### Continuous Development
+
+```bash
+# Start watch mode for automatic updates
+watch-manifests
+
+# In another terminal, edit modules
+vim nixidy/**/*.nix
+
+# Changes are automatically applied
+```
+
+### Validation Workflow
+
+```bash
+# 1. Check nix syntax
+nix-check
+
+# 2. Generate manifests
+gen-manifests
+
+# 3. Dry-run apply
+kubectl apply -f manifests/ --dry-run=server
+
+# 4. Apply if validation passes
+kubectl apply -f manifests/
+```
+
+## Best Practices
+
+### Version Control
+
+- Commit nixidy modules to git
+- Do NOT commit generated `manifests/` directory
+- Use `manifests-result/` symlink for reproducibility
+
+### Testing Changes
+
+```bash
+# Generate and diff before applying
+gen-manifests
+git diff manifests/
+
+# Apply to test namespace first
+kubectl apply -f manifests/component/ -n test
+```
+
+### Chart Updates
+
+```bash
+# When updating chart versions:
+# 1. Clear hash
+vim nixidy/component.nix  # Set chartHash = ""
+
+# 2. Fix hash
+fix-chart-hash
+
+# 3. Test generation
+gen-manifests
+```

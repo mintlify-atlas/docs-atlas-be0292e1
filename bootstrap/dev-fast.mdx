@@ -1,0 +1,228 @@
+---
+title: "Dev-Fast Mode"
+description: "Fast daily development bootstrap with warm cluster support and hash-based caching"
+---
+
+## Overview
+
+Dev-fast mode (`bootstrap.sh`) is optimized for daily development with instant warm starts using hash-based caching. It uses kindnetd CNI (no Cilium) for maximum speed and supports a single control-plane node.
+
+<Info>
+**Cold start:** ~120s | **Warm start:** Instant (hash match) / 10-15s (manifest changes)
+</Info>
+
+## Key Features
+
+- **kindnetd CNI** - No Cilium overhead for faster startup
+- **Single node** - Control-plane only, minimal resource usage
+- **Warm cluster support** - Hash-based state detection
+- **4-phase parallel execution** - Maximum concurrency
+- **No Istio/ArgoCD** - Lightweight for app development
+
+## Command Usage
+
+```bash
+# Standard bootstrap (warm cluster aware)
+bootstrap
+
+# Force clean rebuild
+bootstrap --clean
+
+# Delegate to Cilium mode
+bootstrap --full
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--clean` | Delete existing cluster and force cold start |
+| `--full` | Delegate to `bootstrap-full.sh` (Cilium mode) |
+
+## Warm Cluster (Hash Gate)
+
+The bootstrap script uses SHA-256 hashes to detect cluster state and avoid unnecessary rebuilds:
+
+### Hash Storage
+
+- `.bootstrap-state/cluster` - Hash of `kind-config-dev.yaml` + `images.sh`
+- `.bootstrap-state/manifest` - Hash of entire `manifests-result/` directory
+
+### Decision Logic
+
+<Steps>
+  <Step title="Cluster running + cluster hash match + manifest hash match">
+    **Instant complete** - Health check only, no deployment
+  </Step>
+  <Step title="Cluster running + cluster hash match + manifest hash mismatch">
+    **Warm reapply** (~10-15s) - Regenerate and reapply manifests only
+  </Step>
+  <Step title="Cluster hash mismatch or cluster stopped">
+    **Cold start** (~120s) - Full cluster rebuild
+  </Step>
+</Steps>
+
+## 4-Phase Parallel Execution
+
+### Phase 1: Preparation (Parallel)
+
+All tasks run concurrently:
+
+- **kind-cluster** - Create kind cluster with `kind-config-dev.yaml`
+- **gen-manifests** - Generate Kubernetes manifests
+- **otel-fetch** - Fetch OTel collector image (smart mode: R2 cache → local cache → build)
+- **image-preload** - Pull container images in parallel
+
+<CodeGroup>
+```bash Phase 1 Tasks
+# From bootstrap.sh:218-223
+timed_step "phase1-prep" parallel_run \
+  "kind-cluster:_step_kind_cluster" \
+  "gen-manifests:bash ${SCRIPT_DIR}/gen-manifests.sh" \
+  "otel-fetch:bash ${SCRIPT_DIR}/load-otel-collector-image.sh smart" \
+  "image-preload:_step_image_preload"
+```
+</CodeGroup>
+
+**Typical duration:** ~12s
+
+### Phase 2: Image Load (Sequential)
+
+Load images into kind cluster:
+
+- Load all preloaded images into kind
+- Load OTel collector image
+
+**Typical duration:** ~37s
+
+### Phase 2.5: PostgreSQL Early Start
+
+PostgreSQL starts early to overlap its long startup time (~87s) with other deployments.
+
+```bash
+_step_postgresql_apply
+```
+
+### Phase 3: Deploy Services (Parallel)
+
+All services deploy concurrently:
+
+- **garage** - S3-compatible storage (wait for ready + setup)
+- **observability** - Prometheus stack, Loki, Tempo, OTel collector
+- **traefik** - Ingress controller + auth
+- **cloudflared** - Cloudflare tunnel (if credentials exist)
+
+<CodeGroup>
+```bash Phase 3 Tasks
+# From bootstrap.sh:232-236
+timed_step "phase3-deploy" parallel_run \
+  "garage:_step_garage_deploy" \
+  "observability:_step_observability" \
+  "traefik:_step_traefik" \
+  "cloudflared:_step_cloudflared"
+```
+</CodeGroup>
+
+**Typical duration:** ~21s
+
+### Phase 4: Wait for Pods (Parallel)
+
+Wait for critical pods in parallel:
+
+- PostgreSQL (database namespace)
+- Grafana (observability namespace)
+- Prometheus (observability namespace)
+
+**Typical duration:** ~52s
+
+## Benchmark Results
+
+<CardGroup cols={2}>
+  <Card title="Total Time" icon="clock">
+    ~122s cold start
+  </Card>
+  <Card title="vs Cilium Mode" icon="bolt">
+    38% faster (~197s → ~122s)
+  </Card>
+</CardGroup>
+
+From Apple M4, 24GB RAM:
+
+| Phase | Time |
+|-------|------|
+| phase1-prep | ~12s |
+| phase2-load | ~37s |
+| phase3-deploy | ~21s |
+| phase4-wait | ~52s |
+| **TOTAL** | **~122s** |
+
+## Cluster Configuration
+
+<AccordionGroup>
+  <Accordion title="kind-config-dev.yaml">
+    ```yaml
+    kind: Cluster
+    apiVersion: kind.x-k8s.io/v1alpha4
+    name: microservice-infra
+    nodes:
+      - role: control-plane
+        kubeadmConfigPatches:
+          - |
+            kind: InitConfiguration
+            nodeRegistration:
+              kubeletExtraArgs:
+                node-labels: "ingress-ready=true"
+        extraPortMappings:
+          - containerPort: 30300  # Grafana
+            hostPort: 30300
+          - containerPort: 30081  # Traefik
+            hostPort: 30081
+          - containerPort: 30090  # Prometheus
+            hostPort: 30090
+          - containerPort: 30093  # Alertmanager
+            hostPort: 30093
+    ```
+    
+    **No Cilium:** Uses default kindnetd CNI for simplicity and speed.
+  </Accordion>
+</AccordionGroup>
+
+## Exposed Services
+
+After bootstrap completes:
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Grafana | http://localhost:30300 | admin/admin |
+| Prometheus | http://localhost:30090 | - |
+| Alertmanager | http://localhost:30093 | - |
+| Traefik | http://localhost:30081 | - |
+
+## Next Steps
+
+After dev-fast bootstrap:
+
+```bash
+cd microservice-app && tilt up
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Daily Development" icon="code">
+    Instant restarts with warm cluster support
+  </Card>
+  <Card title="Quick Testing" icon="flask">
+    Fast iteration cycles without Cilium overhead
+  </Card>
+  <Card title="Resource Constrained" icon="memory">
+    Single node, minimal footprint
+  </Card>
+  <Card title="App Development" icon="laptop-code">
+    Full observability stack without service mesh
+  </Card>
+</CardGroup>
+
+## Comparison
+
+See the [Bootstrap Mode Comparison](/bootstrap/comparison) to understand when to use dev-fast vs other modes.

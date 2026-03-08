@@ -1,0 +1,252 @@
+---
+title: Grafana
+description: Metrics visualization and observability dashboards
+---
+
+## Overview
+
+Grafana provides unified visualization for metrics (Prometheus), logs (Loki), and traces (Tempo). It's deployed as part of the kube-prometheus-stack and includes pre-configured data sources and dashboards.
+
+## Configuration
+
+### Nixidy Module (`nixidy/env/local/kube-prometheus-stack.nix`)
+
+```nix
+grafana = {
+  enabled = true;
+  adminPassword = "admin";
+  service = {
+    type = "NodePort";
+    nodePort = 30300;
+  };
+  additionalDataSources = [
+    {
+      name = "Loki";
+      type = "loki";
+      url = "http://loki.observability:3100";
+      access = "proxy";
+      isDefault = false;
+    }
+    {
+      name = "Tempo";
+      type = "tempo";
+      url = "http://tempo.observability:3200";
+      access = "proxy";
+      isDefault = false;
+      jsonData = {
+        tracesToLogsV2 = {
+          datasourceUid = "loki";
+          spanStartTimeShift = "-1h";
+          spanEndTimeShift = "1h";
+          filterByTraceID = true;
+        };
+        tracesToMetrics.datasourceUid = "prometheus";
+        serviceMap.datasourceUid = "prometheus";
+        nodeGraph.enabled = true;
+        lokiSearch.datasourceUid = "loki";
+      };
+    }
+  ];
+};
+```
+
+## Access
+
+- **URL**: http://localhost:30300
+- **Username**: `admin`
+- **Password**: `admin`
+- **Port**: 30300 (NodePort)
+
+## Data Sources
+
+Grafana is pre-configured with three observability backends:
+
+### Prometheus (Default)
+
+- **URL**: `http://kube-prometheus-stack-prometheus.observability:9090`
+- **Type**: Metrics
+- **Default**: Yes
+
+### Loki
+
+- **URL**: `http://loki.observability:3100`
+- **Type**: Logs
+- **Access**: Proxy mode
+
+### Tempo
+
+- **URL**: `http://tempo.observability:3200`
+- **Type**: Traces
+- **Access**: Proxy mode
+
+## Correlation Features
+
+Grafana enables correlation between telemetry types:
+
+### Traces → Logs
+
+```yaml
+tracesToLogsV2:
+  datasourceUid: loki
+  spanStartTimeShift: "-1h"
+  spanEndTimeShift: "1h"
+  filterByTraceID: true
+```
+
+**Workflow**: Click a trace span → See related logs in Loki
+
+### Traces → Metrics
+
+```yaml
+tracesToMetrics:
+  datasourceUid: prometheus
+```
+
+**Workflow**: View trace → Jump to RED metrics in Prometheus
+
+### Service Map
+
+```yaml
+serviceMap:
+  datasourceUid: prometheus
+nodeGraph:
+  enabled: true
+```
+
+**Workflow**: Visualize service dependencies from trace data
+
+### Loki Search from Traces
+
+```yaml
+lokiSearch:
+  datasourceUid: loki
+```
+
+**Workflow**: Search logs by trace ID or span ID
+
+## Dashboards
+
+### Built-in Dashboards
+
+The kube-prometheus-stack includes dashboards for:
+
+- **Kubernetes cluster**: Node, pod, namespace metrics
+- **Kubernetes resources**: CPU, memory, network, disk
+- **Prometheus**: Query performance, scrape health
+- **Alertmanager**: Alert status and history
+- **Node Exporter**: Host-level system metrics
+- **Workloads**: Deployment, StatefulSet, DaemonSet metrics
+- **Persistent Volumes**: Storage usage
+
+### Custom Dashboards
+
+Custom dashboards are defined using Grafonnet (Jsonnet library) in `dashboards/src/`:
+
+- **`sample-app.jsonnet`** - Application-specific metrics
+- **`k8s-cluster.jsonnet`** - Cluster overview
+
+Dashboards are compiled and deployed as ConfigMaps:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sample-app-dashboard
+  namespace: observability
+data:
+  dashboard.json: |  # Compiled Grafonnet dashboard
+```
+
+### Dashboard Auto-Loading
+
+Grafana automatically loads dashboards from ConfigMaps in the `observability` namespace with appropriate labels.
+
+## Visualization Types
+
+### Time Series
+
+Metrics over time (Prometheus queries):
+
+```promql
+rate(http_requests_total[5m])
+```
+
+### Logs Panel
+
+Log streaming from Loki:
+
+```logql
+{namespace="microservices"} |= "error"
+```
+
+### Trace View
+
+Distributed trace visualization from Tempo (Jaeger-style UI).
+
+### Service Graph
+
+Service dependency map derived from trace spans.
+
+## Deployment
+
+Grafana runs as a Deployment in the `observability` namespace:
+
+- **Replicas**: 1
+- **Namespace**: `observability`
+- **Service**: NodePort on 30300
+- **Storage**: ConfigMap-based dashboards
+
+## Observability Workflows
+
+### Debugging Slow Requests
+
+1. View service metrics in Prometheus dashboard
+2. Identify slow endpoint from trace service map
+3. Open trace in Tempo to see span timing
+4. Click span → View logs in Loki for errors
+
+### Investigating Errors
+
+1. Query Loki for error logs
+2. Extract trace ID from log entry
+3. Open trace in Tempo
+4. Correlate with metrics spike in Prometheus
+
+### Capacity Planning
+
+1. Use Kubernetes dashboards for resource usage
+2. Identify bottlenecks (CPU, memory, network)
+3. Correlate with application metrics
+4. Plan scaling based on trends
+
+## Integration
+
+### Prometheus
+
+Default data source for all metrics dashboards.
+
+### Loki
+
+Log aggregation with label-based filtering:
+
+```logql
+{namespace="microservices", service="greeter"} |= "trace_id"
+```
+
+### Tempo
+
+Trace backend with exemplar support (links from metrics to traces).
+
+### ConfigMaps
+
+Dashboards are stored as ConfigMaps in `manifests/kube-prometheus-stack/ConfigMap-*-dashboard.yaml`.
+
+## Alerting
+
+Grafana can send alerts based on queries, but in this stack, alerting is primarily handled by Prometheus Alertmanager.
+
+## Related Components
+
+- [Prometheus](/components/prometheus) - Metrics data source
+- [Loki](/components/loki) - Logs data source
+- [Tempo](/components/tempo) - Traces data source

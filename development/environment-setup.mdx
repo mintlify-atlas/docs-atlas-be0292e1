@@ -1,0 +1,219 @@
+---
+title: Environment Setup
+description: Development environment configuration with devenv, direnv, and essential tools
+---
+
+## Overview
+
+The project uses [devenv](https://devenv.sh) for declarative development environment management, providing a consistent setup across all platforms (macOS, Linux, WSL2) with automatic shell integration via direnv.
+
+## Prerequisites
+
+- **Nix** with flakes enabled
+- **direnv** (optional but recommended)
+- **Docker** (for kind clusters)
+
+## Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/thirdlf03/microservice-infra
+cd microservice-infra
+
+# Enter the development shell
+direnv allow  # if using direnv
+# or
+nix develop
+```
+
+## Configuration
+
+The development environment is configured in `devenv.nix`, which automatically installs all required tools and sets up helper scripts.
+
+### Available Tools
+
+The following tools are automatically available in the development shell:
+
+#### Kubernetes Tools
+- **kind** - Local Kubernetes cluster
+- **kubectl** - Kubernetes CLI
+- **kubernetes-helm** - Helm package manager
+- **argocd** - ArgoCD CLI
+
+#### Networking & Service Mesh
+- **cilium-cli** - Cilium CNI management
+- **hubble** - Network observability
+- **istioctl** - Istio service mesh CLI
+
+#### Secret Management
+- **sops** - Secrets encryption
+- **age** - Modern encryption tool
+
+#### Dashboards as Code
+- **go-jsonnet** - Jsonnet compiler
+- **jsonnet-bundler** - Jsonnet package manager
+- **grafanactl** - Grafana management
+
+#### Container Operations
+- **skopeo** - Container image operations
+
+#### Nix Utilities
+- **nh** - Nix helper
+- **nix-output-monitor** - Build output monitoring
+- **nix-tree** - Dependency visualization
+- **nurl** - Nix URL generator
+
+#### Other Tools
+- **git** - Version control
+- **watchexec** - File watcher
+- **cloudflared** - Cloudflare Tunnel client
+
+### Development Scripts
+
+The devenv configuration provides convenient wrapper scripts for common operations:
+
+#### Cluster Management
+```bash
+cluster-up        # Create kind cluster
+cluster-down      # Destroy kind cluster
+cluster-stop      # Stop cluster (preserve state)
+cluster-start     # Start stopped cluster
+```
+
+#### Bootstrap Commands
+```bash
+bootstrap         # Dev-fast setup (kindnetd, warm cluster, single node)
+bootstrap-full    # Full setup with Cilium (parity mode)
+full-bootstrap    # Full environment setup (legacy)
+argocd-bootstrap  # Bootstrap ArgoCD on cluster
+```
+
+#### Development Workflow
+```bash
+gen-manifests     # Regenerate nixidy manifests into manifests/
+watch-manifests   # Watch nixidy modules and apply changes automatically
+nix-check         # Fast nix expression sanity check
+```
+
+#### Installation Commands
+```bash
+cilium-install    # Install Cilium + Hubble into kind cluster
+istio-install     # Install Istio ambient mode
+cloudflared-setup # Setup Cloudflare Tunnel + DNS
+```
+
+#### Utilities
+```bash
+sops-init                    # Generate age key for sops
+load-otel-collector-image    # Build + load custom OTel Collector into kind
+fix-chart-hash               # Auto-fix empty chartHash in nixidy modules
+benchmark                    # Run bootstrap benchmark (N iterations)
+debug-k8s                    # Kubernetes pod/event debug
+```
+
+### Watch Manifests Workflow
+
+For rapid development, use the `watch-manifests` command to automatically regenerate and apply manifests when nixidy modules change:
+
+```bash
+watch-manifests
+```
+
+This command:
+1. Watches all `.nix` files in the nixidy/ directory
+2. Automatically runs `gen-manifests.sh` on changes
+3. Applies updated manifests with `kubectl apply -f manifests/`
+4. Restarts on errors
+
+**Implementation** (from devenv.nix:108):
+```nix
+watch-manifests.exec = ''
+  echo "Watching nixidy modules for changes..."
+  watchexec --exts nix --restart -- bash -lc 'bash scripts/gen-manifests.sh && kubectl apply -f manifests/'
+'';
+```
+
+## Shell Environment
+
+### Enter Shell Message
+
+When entering the development shell, you'll see:
+
+```
+microservice-infra dev environment loaded
+
+Available commands:
+  cluster-up       : Create kind cluster
+  cluster-down     : Destroy kind cluster
+  ...
+
+Cilium / Hubble:
+  cilium status            : Check Cilium health
+  cilium hubble ui         : Open Hubble UI (http://localhost:12000)
+  hubble observe -n <ns>   : Observe network flows
+```
+
+### Environment Variables
+
+The following environment variables are automatically set:
+
+- `R2_BUCKET_URL` - Cloudflare R2 bucket for OTel Collector images
+
+### Git Hooks
+
+Pre-commit hooks are automatically configured:
+
+- **treefmt** - Automatic code formatting
+- **shellcheck** - Shell script validation (with `-x -P SCRIPTDIR` flags)
+
+## Code Formatting
+
+The project uses [treefmt](https://github.com/numtide/treefmt) for automatic code formatting:
+
+```bash
+treefmt  # Format all files
+```
+
+Formatting configuration is imported from `treefmt-programs.nix`.
+
+## Platform Support
+
+The development environment supports:
+
+- **macOS** (Intel and Apple Silicon)
+- **Linux** (x86_64 and aarch64)
+- **WSL2** (Windows Subsystem for Linux)
+
+Platform detection and architecture handling are provided by `scripts/lib/platform.sh`.
+
+## Troubleshooting
+
+### Docker Not Running
+
+If you see Docker-related errors, ensure Docker Desktop is running:
+
+```bash
+docker info  # Should show Docker server information
+```
+
+### Nix Evaluation Errors
+
+Run the sanity check to quickly validate Nix expressions:
+
+```bash
+nix-check
+```
+
+### Debugging Kubernetes Issues
+
+Use the debug helper to see pod status and recent events:
+
+```bash
+debug-k8s
+```
+
+## Next Steps
+
+- Learn about [nixidy module structure](/development/nixidy)
+- Explore [Grafana dashboard development](/development/dashboards)
+- Run [bootstrap benchmarks](/development/benchmarking)

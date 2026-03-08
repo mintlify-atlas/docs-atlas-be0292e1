@@ -1,0 +1,675 @@
+---
+title: Observability Stack
+description: Metrics, logs, and traces with Prometheus, Grafana, Loki, Tempo, and OpenTelemetry
+---
+
+The platform implements a complete observability stack based on the three pillars: metrics, logs, and traces. All components are pre-integrated with correlation between signals.
+
+## Architecture Overview
+
+```
+Applications
+  ↓ (OTLP)
+OpenTelemetry Collector
+  ├─→ Prometheus (metrics)
+  ├─→ Loki (logs)
+  └─→ Tempo (traces)
+      ↓
+Garage S3 (long-term storage)
+      ↓
+Grafana (unified query)
+```
+
+## Components
+
+| Component | Role | Port | Access |
+|-----------|------|------|---------|
+| **Grafana** | Unified UI and dashboarding | 30300 | http://localhost:30300 (admin/admin) |
+| **Prometheus** | Metrics storage and alerting | 30090 | http://localhost:30090 |
+| **Alertmanager** | Alert routing and deduplication | 30093 | http://localhost:30093 |
+| **Loki** | Log aggregation and querying | 3100 | Internal only |
+| **Tempo** | Distributed trace storage | 3200 | Internal only |
+| **OTel Collector** | Telemetry pipeline and routing | 4317/4318 | Internal only |
+| **Garage** | S3-compatible object storage | 3900 | Internal only |
+
+## OpenTelemetry Collector
+
+The platform uses a custom-built OpenTelemetry Collector defined in `flake.nix`:
+
+```nix
+otel-collector = otelPkgs.buildOtelCollector {
+  pname = "otel-collector";
+  version = "0.147.0";
+  config = {
+    receivers = [
+      { gomod = "go.opentelemetry.io/collector/receiver/otlpreceiver v0.147.0"; }
+    ];
+    processors = [
+      { gomod = "go.opentelemetry.io/collector/processor/batchprocessor v0.147.0"; }
+    ];
+    exporters = [
+      { gomod = "go.opentelemetry.io/collector/exporter/otlpexporter v0.147.0"; }
+      { gomod = "go.opentelemetry.io/collector/exporter/otlphttpexporter v0.147.0"; }
+      { gomod = "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter v0.147.0"; }
+    ];
+  };
+};
+```
+
+### Configuration
+
+The collector is deployed with this pipeline configuration:
+
+```yaml
+# From nixidy/env/local/otel-collector.nix
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  prometheusremotewrite:
+    endpoint: http://kube-prometheus-stack-prometheus.observability:9090/api/v1/write
+  otlp:
+    endpoint: tempo.observability:4317
+    tls:
+      insecure: true
+  otlphttp:
+    endpoint: http://loki.observability:3100/otlp
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp]
+```
+
+### Pipelines
+
+**Traces Pipeline**:
+- Receives traces via OTLP gRPC/HTTP
+- Batches spans for efficiency
+- Exports to Tempo via OTLP gRPC
+
+**Metrics Pipeline**:
+- Receives metrics via OTLP gRPC/HTTP
+- Batches datapoints
+- Converts to Prometheus format and writes via remote write API
+
+**Logs Pipeline**:
+- Receives logs via OTLP gRPC/HTTP
+- Batches log records
+- Exports to Loki via OTLP HTTP
+
+### Why Custom Build?
+
+**Benefits:**
+- **Minimal size**: Only 3 receivers, 1 processor, 3 exporters (vs. 100+ in full distribution)
+- **Security**: No unnecessary components that could have vulnerabilities
+- **Performance**: Smaller binary, faster startup, lower memory usage
+- **Reproducibility**: Exact versions pinned in flake.lock
+
+## Prometheus
+
+Prometheus is deployed via the kube-prometheus-stack Helm chart.
+
+### Configuration
+
+```nix
+# From nixidy/env/local/kube-prometheus-stack.nix
+prometheus = {
+  service = {
+    type = "NodePort";
+    nodePort = 30090;
+  };
+  prometheusSpec = {
+    replicas = 1;
+    retention = "24h";
+    enableRemoteWriteReceiver = true;
+    
+    storageSpec = {
+      volumeClaimTemplate.spec = {
+        accessModes = ["ReadWriteOnce"];
+        resources.requests.storage = "5Gi";
+      };
+    };
+    
+    serviceMonitorSelectorNilUsesHelmValues = false;
+    podMonitorSelectorNilUsesHelmValues = false;
+  };
+};
+```
+
+### Key Features
+
+**Remote Write Receiver**:
+- Accepts metrics from OTel Collector via Prometheus remote write protocol
+- Converts OTLP metrics to Prometheus format
+- No need for separate Prometheus exporters
+
+**Service Discovery**:
+- Automatically discovers ServiceMonitors and PodMonitors in any namespace
+- No manual scrape config required
+- `serviceMonitorSelectorNilUsesHelmValues = false` enables cluster-wide discovery
+
+**Storage**:
+- 5 GB persistent volume for local storage
+- 24-hour retention (configurable)
+- Uses TSDB format for efficient time-series storage
+
+### Metrics Available
+
+**Kubernetes Metrics**:
+- Node metrics (CPU, memory, disk, network) from node-exporter
+- Pod metrics (resource usage, restarts, status) from kubelet
+- Container metrics (CPU, memory limits/requests) from cAdvisor
+- Cluster state (deployments, services, endpoints) from kube-state-metrics
+
+**Istio Metrics**:
+- Request rate, duration, size by service
+- Error rates and HTTP status codes
+- TCP connection metrics
+- mTLS usage statistics
+
+**Application Metrics** (via OTel SDK):
+- Custom business metrics
+- HTTP server metrics
+- Database client metrics
+- Queue depth and processing time
+
+## Loki
+
+Loki provides scalable log aggregation with S3 backend storage.
+
+### Configuration
+
+```nix
+# From nixidy/env/local/loki.nix
+loki = {
+  deploymentMode = "SingleBinary";
+  auth_enabled = false;
+  commonConfig.replication_factor = 1;
+  
+  storage = {
+    type = "s3";
+    bucketNames = {
+      chunks = "loki-chunks";
+      ruler = "loki-chunks";
+      admin = "loki-chunks";
+    };
+    s3 = {
+      endpoint = "http://garage.storage:3900";
+      region = "garage";
+      insecure = true;
+      s3forcepathstyle = true;
+    };
+  };
+  
+  schemaConfig.configs = [
+    {
+      from = "2024-01-01";
+      store = "tsdb";
+      object_store = "s3";
+      schema = "v13";
+      index = {
+        prefix = "loki_index_";
+        period = "24h";
+      };
+    }
+  ];
+};
+```
+
+### Storage Architecture
+
+**TSDB + S3**:
+- **Index**: TSDB (Time Series Database) for fast label queries
+- **Chunks**: Compressed log data in S3-compatible storage (Garage)
+- **Schema v13**: Latest Loki schema with improved query performance
+
+**Benefits:**
+- Unlimited retention (limited only by S3 capacity)
+- Cost-effective storage (object storage is cheap)
+- Separation of index and chunks for scalability
+- Fast queries on recent data, slower but complete on historical data
+
+### OTLP Ingestion
+
+Loki accepts logs via OTLP HTTP endpoint:
+
+```
+Application → OTLP → OTel Collector → OTLP HTTP → Loki
+```
+
+**Format conversion:**
+- OTLP log records → Loki log lines
+- OTLP attributes → Loki labels
+- Timestamp preserved
+- Resource attributes become static labels
+
+### Query Language (LogQL)
+
+Loki uses LogQL for querying:
+
+```logql
+# All logs from a namespace
+{namespace="microservices"}
+
+# Filter by pod and log level
+{namespace="microservices", pod=~"frontend-.*"} |= "error"
+
+# Extract fields and aggregate
+{namespace="microservices"} | json | __error__="" | unwrap duration | avg by (service)
+
+# Rate of errors per second
+rate({namespace="microservices"} |= "error" [5m])
+```
+
+## Tempo
+
+Tempo stores distributed traces with S3 backend.
+
+### Configuration
+
+```nix
+# From nixidy/env/local/tempo.nix
+tempo = {
+  storage = {
+    trace = {
+      backend = "s3";
+      s3 = {
+        endpoint = "garage.storage:3900";
+        bucket = "tempo-traces";
+        region = "garage";
+        insecure = true;
+        forcepathstyle = true;
+      };
+      wal.path = "/var/tempo/wal";
+    };
+  };
+  
+  receivers = {
+    otlp = {
+      protocols = {
+        grpc.endpoint = "0.0.0.0:4317";
+        http.endpoint = "0.0.0.0:4318";
+      };
+    };
+  };
+  
+  metricsGenerator = {
+    enabled = true;
+    remoteWriteUrl = "http://kube-prometheus-stack-prometheus.observability:9090/api/v1/write";
+  };
+};
+```
+
+### Trace Storage
+
+**S3 Backend**:
+- Traces stored as compressed Parquet files in Garage S3
+- Efficient columnar format for fast queries
+- Unlimited retention with low storage costs
+
+**WAL (Write-Ahead Log)**:
+- Recent traces buffered in local disk
+- Fast writes with eventual consistency
+- Flushed to S3 periodically
+
+### Metrics Generator
+
+Tempo can derive metrics from traces:
+
+```
+Traces → Metrics Generator → Prometheus Remote Write → Prometheus
+```
+
+**Generated metrics:**
+- `traces_spanmetrics_calls_total`: Request count by service
+- `traces_spanmetrics_latency_bucket`: Latency histograms
+- `traces_spanmetrics_size_total`: Request/response size
+
+**Benefits:**
+- RED metrics (Rate, Errors, Duration) automatically from traces
+- No need to instrument both tracing and metrics
+- Consistent labels between traces and metrics
+- Exemplars link metrics back to example traces
+
+### Istio Integration
+
+Istio sends traces to OTel Collector, which forwards to Tempo:
+
+```
+Istio Waypoint Proxy
+  ↓ (OTLP gRPC)
+OTel Collector (otel-collector.observability:4317)
+  ↓ (OTLP gRPC)
+Tempo (tempo.observability:4317)
+```
+
+Configuration in `scripts/istio-install.sh`:
+
+```bash
+istioctl install \
+  --set meshConfig.enableTracing=true \
+  --set "meshConfig.extensionProviders[0].name=otel-tracing" \
+  --set "meshConfig.extensionProviders[0].opentelemetry.service=otel-collector.observability.svc.cluster.local" \
+  --set "meshConfig.extensionProviders[0].opentelemetry.port=4317"
+```
+
+Telemetry resource in `istio/telemetry.yaml`:
+
+```yaml
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: mesh-tracing
+  namespace: istio-system
+spec:
+  tracing:
+    - providers:
+        - name: otel-tracing
+      randomSamplingPercentage: 100  # Sample all requests (dev only)
+```
+
+## Grafana
+
+Grafana provides the unified query interface for all observability data.
+
+### Data Sources
+
+All data sources are pre-configured in `nixidy/env/local/kube-prometheus-stack.nix`:
+
+```nix
+additionalDataSources = [
+  {
+    name = "Loki";
+    type = "loki";
+    url = "http://loki.observability:3100";
+    access = "proxy";
+    isDefault = false;
+  }
+  {
+    name = "Tempo";
+    type = "tempo";
+    url = "http://tempo.observability:3200";
+    access = "proxy";
+    isDefault = false;
+    jsonData = {
+      tracesToLogsV2 = {
+        datasourceUid = "loki";
+        spanStartTimeShift = "-1h";
+        spanEndTimeShift = "1h";
+        filterByTraceID = true;
+        filterBySpanID = false;
+      };
+      tracesToMetrics.datasourceUid = "prometheus";
+      serviceMap.datasourceUid = "prometheus";
+      nodeGraph.enabled = true;
+      lokiSearch.datasourceUid = "loki";
+    };
+  }
+];
+```
+
+### Correlation Features
+
+**Trace → Logs**:
+- Click "Logs" button on a span
+- Automatically queries Loki with trace ID filter
+- Time range adjusted to span duration ±1 hour
+- Shows logs from services involved in the trace
+
+**Trace → Metrics**:
+- Click "Metrics" button on a span
+- Queries Prometheus for service metrics in the trace
+- Shows request rate, latency, errors for the service
+- Exemplars allow jumping from metric back to trace
+
+**Logs → Traces**:
+- Loki results include "Tempo" button when trace ID detected
+- Automatically extracts trace ID from log fields
+- Opens full trace view in Tempo
+
+**Metrics → Traces (Exemplars)**:
+- Prometheus queries return exemplars (example trace IDs)
+- Click exemplar point on graph to view trace
+- Links specific metric spike to actual request
+
+### Dashboards
+
+The platform includes pre-built dashboards in `dashboards/`:
+
+```
+dashboards/
+├── kubernetes/
+│   ├── cluster-overview.jsonnet
+│   ├── pod-resources.jsonnet
+│   └── namespace-usage.jsonnet
+└── istio/
+    ├── service-mesh.jsonnet
+    ├── workload-metrics.jsonnet
+    └── performance.jsonnet
+```
+
+Dashboards are built using Grafonnet (Jsonnet library for Grafana):
+
+```jsonnet
+local grafana = import 'grafonnet/grafana.libsonnet';
+local prometheus = grafana.prometheus;
+
+grafana.dashboard.new(
+  'Service Mesh Overview',
+  time_from='now-1h',
+)
+.addPanel(
+  grafana.graphPanel.new(
+    'Request Rate',
+    datasource='Prometheus',
+    span=6,
+  )
+  .addTarget(
+    prometheus.target(
+      'sum(rate(istio_requests_total[5m])) by (destination_service)'
+    )
+  ),
+  gridPos={ x: 0, y: 0, w: 12, h: 8 }
+)
+```
+
+## Garage S3 Storage
+
+Garage provides S3-compatible object storage for Loki and Tempo.
+
+### Why Garage?
+
+- **Lightweight**: Designed for self-hosted deployments
+- **S3 compatible**: Works with any S3-compatible client
+- **Kubernetes-native**: Runs as a StatefulSet
+- **No external dependencies**: No need for MinIO, AWS S3, etc.
+
+### Setup
+
+Garage is bootstrapped via `scripts/garage-setup.sh`:
+
+```bash
+# Create buckets
+garage bucket create loki-chunks
+garage bucket create tempo-traces
+
+# Create access keys
+garage key create loki-key
+garage key create tempo-key
+
+# Grant permissions
+garage bucket allow loki-chunks --read --write --key loki-key
+garage bucket allow tempo-traces --read --write --key tempo-key
+```
+
+Credentials are stored in Kubernetes secrets and mounted into Loki/Tempo pods.
+
+## Data Flow Examples
+
+### Application Request Trace
+
+```
+1. User → Traefik → Frontend Pod
+   └─ Frontend sends OTLP span to OTel Collector
+
+2. Frontend → (via Istio) → Backend Pod
+   ├─ Istio Waypoint creates span
+   └─ Backend sends OTLP span to OTel Collector
+
+3. OTel Collector → Tempo
+   └─ Complete trace stored in Garage S3
+
+4. Backend logs error
+   └─ OTLP log with trace_id → OTel Collector → Loki
+
+5. Tempo Metrics Generator
+   └─ Derives metrics from trace → Prometheus
+
+6. User queries Grafana
+   ├─ Sees high latency in Prometheus graph
+   ├─ Clicks exemplar → Opens trace in Tempo
+   └─ Clicks "Logs" on error span → Views logs in Loki
+```
+
+### Log Aggregation Flow
+
+```
+Application Pod
+  ↓ (stdout/stderr)
+Kubernetes logs
+  ↓ (OTLP via OTel SDK)
+OTel Collector (4318)
+  ↓ (OTLP HTTP)
+Loki (3100)
+  ↓ (compressed chunks)
+Garage S3 (loki-chunks bucket)
+  ↓ (query)
+Grafana Explore
+```
+
+## Performance Tuning
+
+### OTel Collector Batching
+
+```yaml
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+```
+
+**Trade-offs:**
+- Larger batches → Higher throughput, more latency
+- Smaller batches → Lower latency, more overhead
+
+### Prometheus Retention
+
+```yaml
+retention: "24h"  # Local TSDB retention
+storageSpec:
+  volumeClaimTemplate.spec:
+    resources.requests.storage: "5Gi"
+```
+
+**Recommendations:**
+- Dev: 24h retention, 5 GB storage
+- Staging: 7d retention, 20 GB storage
+- Production: 30d retention, 100+ GB storage (or use Thanos for long-term storage)
+
+### Loki Query Performance
+
+**Optimize queries:**
+- Always include namespace label
+- Limit time range to minimum needed
+- Use streaming for large result sets
+- Pre-filter with label matchers before line filters
+
+**Good query:**
+```logql
+{namespace="microservices", app="frontend"} |= "error" | json | level="error"
+```
+
+**Bad query:**
+```logql
+{namespace="microservices"} | json | level="error"  # Scans all logs before filtering
+```
+
+## Troubleshooting
+
+### OTel Collector Not Receiving Data
+
+```bash
+# Check collector logs
+kubectl logs -n observability deploy/otel-collector -f
+
+# Test OTLP endpoint
+kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
+  curl -v http://otel-collector.observability:4318/v1/traces
+
+# Verify service
+kubectl get svc -n observability otel-collector
+```
+
+### Prometheus Remote Write Errors
+
+```bash
+# Check Prometheus logs
+kubectl logs -n observability prometheus-kube-prometheus-stack-prometheus-0 -f
+
+# Verify remote write receiver is enabled
+kubectl exec -n observability prometheus-kube-prometheus-stack-prometheus-0 -- \
+  wget -qO- localhost:9090/api/v1/status/config | grep enable-feature
+
+# Test remote write endpoint
+kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
+  curl -v http://kube-prometheus-stack-prometheus.observability:9090/api/v1/write
+```
+
+### Loki/Tempo S3 Connection Issues
+
+```bash
+# Check Garage status
+kubectl get pods -n storage -l app.kubernetes.io/name=garage
+
+# Verify S3 endpoint from pod
+kubectl exec -n observability deploy/loki -- \
+  wget -qO- http://garage.storage:3900
+
+# Check credentials
+kubectl get secret -n observability garage-s3-credentials -o yaml
+
+# View Loki/Tempo logs for S3 errors
+kubectl logs -n observability deploy/loki | grep -i s3
+kubectl logs -n observability deploy/tempo | grep -i s3
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="GitOps" icon="code-branch" href="/architecture/gitops">
+    Learn how observability configs are managed via ArgoCD and Nixidy
+  </Card>
+  <Card title="Kubernetes Setup" icon="dharmachakra" href="/architecture/kubernetes">
+    Understand the underlying cluster architecture
+  </Card>
+</CardGroup>

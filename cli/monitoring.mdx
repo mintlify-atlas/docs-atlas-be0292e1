@@ -1,0 +1,431 @@
+---
+title: Monitoring & Debugging
+description: Debug and monitor your Kubernetes cluster with built-in tools
+---
+
+Monitoring and debugging commands help you inspect cluster state and troubleshoot issues.
+
+## debug-k8s
+
+Quick Kubernetes pod and event debugging.
+
+### Syntax
+
+```bash
+debug-k8s
+```
+
+### Behavior
+
+Displays two key diagnostic views:
+
+1. **Pod status**: All pods across all namespaces
+2. **Recent events**: Last 10 events sorted by timestamp
+
+### Example
+
+```bash
+# Debug cluster state
+debug-k8s
+```
+
+### Output
+
+```
+=== Pod status ===
+NAMESPACE        NAME                           READY   STATUS    RESTARTS   AGE
+argocd           argocd-server-7d8b9c5f6-xk2mw  1/1     Running   0          2d
+observability    grafana-5d7c8b9f4-9h6k2        1/1     Running   0          2d
+observability    prometheus-0                   2/2     Running   0          2d
+database         postgresql-0                   1/1     Running   0          2d
+edge             traefik-5c7d8b9f4-7j3k1        1/1     Running   0          2d
+
+=== Recent events ===
+NAMESPACE     LAST SEEN   TYPE      REASON              OBJECT                        MESSAGE
+observability  1m         Normal    Scheduled           pod/grafana-5d7c8b9f4-9h6k2   Successfully assigned...
+observability  1m         Normal    Pulling             pod/grafana-5d7c8b9f4-9h6k2   Pulling image...
+observability  45s        Normal    Pulled              pod/grafana-5d7c8b9f4-9h6k2   Successfully pulled...
+observability  45s        Normal    Created             pod/grafana-5d7c8b9f4-9h6k2   Created container...
+observability  44s        Normal    Started             pod/grafana-5d7c8b9f4-9h6k2   Started container...
+```
+
+### Use Cases
+
+- Quick health check after bootstrap
+- Investigate pod failures
+- Check for recent errors
+- Monitor pod restart patterns
+- Diagnose deployment issues
+
+### Related Commands
+
+- `kubectl get pods -A` - Direct pod listing
+- `kubectl describe pod <name> -n <namespace>` - Detailed pod info
+- `kubectl logs <pod> -n <namespace>` - Pod logs
+
+---
+
+## Cilium CLI Commands
+
+Cilium provides network policy enforcement and observability. These commands are available after running `bootstrap-full` or `cilium-install`.
+
+### cilium status
+
+Check Cilium health and component status.
+
+#### Syntax
+
+```bash
+cilium status
+```
+
+#### Example Output
+
+```
+    /¯¯\
+ /¯¯\__/¯¯\    Cilium:         OK
+ \__/¯¯\__/    Operator:       OK
+ /¯¯\__/¯¯\    Hubble:         OK
+ \__/¯¯\__/    ClusterMesh:    disabled
+    \__/
+
+DaemonSet         cilium             Desired: 3, Ready: 3/3, Available: 3/3
+Deployment        cilium-operator    Desired: 1, Ready: 1/1, Available: 1/1
+Deployment        hubble-relay       Desired: 1, Ready: 1/1, Available: 1/1
+Deployment        hubble-ui          Desired: 1, Ready: 1/1, Available: 1/1
+```
+
+#### Use Cases
+
+- Verify Cilium installation
+- Check network connectivity
+- Diagnose CNI issues
+- Monitor Cilium component health
+
+### cilium connectivity test
+
+Run network connectivity tests.
+
+#### Syntax
+
+```bash
+cilium connectivity test
+```
+
+#### Behavior
+
+- Deploys test workloads
+- Tests pod-to-pod connectivity
+- Tests service connectivity
+- Tests network policy enforcement
+- Tests DNS resolution
+
+#### Use Cases
+
+- Validate network configuration
+- Troubleshoot connectivity issues
+- Verify network policies
+- Test after cluster changes
+
+### cilium hubble ui
+
+Open Hubble UI for network observability.
+
+#### Syntax
+
+```bash
+cilium hubble ui
+```
+
+#### Behavior
+
+- Opens Hubble UI in default browser
+- Available at `http://localhost:12000` (port-forwarded)
+- Requires Cilium with Hubble enabled
+
+#### Alternative Access
+
+Direct NodePort access (configured in bootstrap):
+
+```bash
+# Open in browser
+open http://localhost:31235
+```
+
+#### Features
+
+- Real-time network flow visualization
+- Service dependency map
+- Network policy insights
+- DNS query monitoring
+- HTTP/gRPC request tracing
+
+#### Example Use Cases
+
+- Debug service connectivity
+- Visualize microservice dependencies
+- Monitor network policies
+- Investigate DNS issues
+- Analyze request patterns
+
+---
+
+## Hubble CLI Commands
+
+Hubble provides CLI-based network observability.
+
+### hubble observe
+
+Observe network flows in real-time.
+
+#### Syntax
+
+```bash
+hubble observe [options]
+```
+
+#### Common Options
+
+<ParamField path="-n, --namespace" type="string">
+  Filter flows by namespace
+</ParamField>
+
+<ParamField path="--pod" type="string">
+  Filter flows by pod name
+</ParamField>
+
+<ParamField path="--from-pod" type="string">
+  Filter flows from specific pod
+</ParamField>
+
+<ParamField path="--to-pod" type="string">
+  Filter flows to specific pod
+</ParamField>
+
+<ParamField path="--verdict" type="string">
+  Filter by verdict (FORWARDED, DROPPED)
+</ParamField>
+
+<ParamField path="--protocol" type="string">
+  Filter by protocol (TCP, UDP, ICMP)
+</ParamField>
+
+<ParamField path="-f, --follow" type="flag">
+  Follow flows continuously
+</ParamField>
+
+#### Examples
+
+```bash
+# Observe all flows in microservices namespace
+hubble observe -n microservices
+
+# Follow flows from specific pod
+hubble observe --from-pod user-service-7d9f8c5b4-x9k2m -f
+
+# Show dropped packets
+hubble observe --verdict DROPPED
+
+# Monitor HTTP traffic
+hubble observe --protocol TCP --port 80
+
+# Watch DNS queries
+hubble observe --protocol UDP --port 53
+```
+
+#### Output Format
+
+```
+Dec 12 10:23:45.123: microservices/user-service-7d9f8c5b4-x9k2m:43210 -> \
+  microservices/auth-service-5c6d7e8f9-p3q4r:8080 to-endpoint FORWARDED (TCP Flags: SYN)
+
+Dec 12 10:23:45.145: microservices/auth-service-5c6d7e8f9-p3q4r:8080 -> \
+  microservices/user-service-7d9f8c5b4-x9k2m:43210 to-endpoint FORWARDED (TCP Flags: SYN, ACK)
+```
+
+#### Use Cases
+
+- Debug service-to-service communication
+- Investigate network policy drops
+- Monitor DNS resolution
+- Analyze traffic patterns
+- Troubleshoot connectivity issues
+
+### hubble status
+
+Check Hubble relay connection status.
+
+#### Syntax
+
+```bash
+hubble status
+```
+
+#### Example Output
+
+```
+Healthcheck (via localhost:4245): Ok
+Current/Max Flows: 12,543/16,384 (76.58%)
+Flows/s: 42.35
+```
+
+---
+
+## Observability Stack Access
+
+The bootstrap commands deploy a complete observability stack:
+
+### Grafana
+
+```bash
+# Access Grafana
+open http://localhost:30300
+
+# Default credentials
+Username: admin
+Password: admin
+```
+
+**Features:**
+- Pre-configured dashboards
+- Prometheus data source
+- Loki logs integration
+- Tempo traces integration
+- Alerting rules
+
+### Prometheus
+
+```bash
+# Access Prometheus UI
+open http://localhost:30090
+
+# Query metrics
+curl http://localhost:30090/api/v1/query?query=up
+```
+
+**Use Cases:**
+- Query metrics directly
+- Test PromQL queries
+- Check targets
+- View alerts
+
+### Alertmanager
+
+```bash
+# Access Alertmanager UI
+open http://localhost:30093
+```
+
+**Features:**
+- View active alerts
+- Silence alerts
+- Check notification status
+
+### Hubble UI
+
+```bash
+# Access Hubble UI (after bootstrap-full)
+open http://localhost:31235
+```
+
+**Features:**
+- Network flow visualization
+- Service map
+- Policy insights
+
+---
+
+## Debugging Workflows
+
+### Pod Failure Investigation
+
+```bash
+# 1. Check overall cluster state
+debug-k8s
+
+# 2. Get detailed pod info
+kubectl describe pod <pod-name> -n <namespace>
+
+# 3. Check pod logs
+kubectl logs <pod-name> -n <namespace>
+
+# 4. Check previous logs if restarted
+kubectl logs <pod-name> -n <namespace> --previous
+```
+
+### Network Connectivity Issues
+
+```bash
+# 1. Check Cilium health
+cilium status
+
+# 2. Observe network flows
+hubble observe -n <namespace> -f
+
+# 3. Check for dropped packets
+hubble observe --verdict DROPPED
+
+# 4. Run connectivity test
+cilium connectivity test
+
+# 5. Open Hubble UI for visualization
+open http://localhost:31235
+```
+
+### Service Discovery Issues
+
+```bash
+# 1. Check DNS resolution
+hubble observe --protocol UDP --port 53
+
+# 2. Verify service exists
+kubectl get svc -n <namespace>
+
+# 3. Check endpoints
+kubectl get endpoints -n <namespace>
+
+# 4. Test DNS from pod
+kubectl exec -it <pod> -n <namespace> -- nslookup <service>
+```
+
+### Performance Investigation
+
+```bash
+# 1. Check pod resource usage
+kubectl top pods -A
+
+# 2. Check node resource usage
+kubectl top nodes
+
+# 3. View metrics in Grafana
+open http://localhost:30300
+
+# 4. Query Prometheus directly
+curl 'http://localhost:30090/api/v1/query?query=rate(container_cpu_usage_seconds_total[5m])'
+```
+
+## Best Practices
+
+### Regular Health Checks
+
+```bash
+# Daily health check
+debug-k8s
+cilium status
+kubectl get nodes
+```
+
+### Monitoring Setup
+
+1. Keep Grafana open during development
+2. Set up alerts for critical metrics
+3. Use Hubble UI to understand service dependencies
+4. Monitor pod restart counts
+
+### Troubleshooting
+
+1. Start with `debug-k8s` for quick overview
+2. Use `hubble observe` for network issues
+3. Check logs for application errors
+4. Use `cilium status` for CNI issues
+5. Consult Grafana dashboards for trends

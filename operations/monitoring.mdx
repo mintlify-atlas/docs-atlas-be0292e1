@@ -1,0 +1,431 @@
+---
+title: Monitoring
+description: Access Grafana, Prometheus, and observability dashboards
+---
+
+## Overview
+
+The microservice-infra stack includes a complete observability platform:
+
+- **Prometheus** - Metrics collection and alerting
+- **Grafana** - Visualization and dashboards
+- **Alertmanager** - Alert routing and management
+- **Loki** - Log aggregation
+- **Tempo** - Distributed tracing
+- **OpenTelemetry Collector** - Telemetry data collection
+
+## Access Points
+
+All monitoring services are exposed via NodePort:
+
+| Service | URL | Credentials | Notes |
+|---------|-----|-------------|-------|
+| Grafana | http://localhost:30300 | admin/admin | Primary dashboards |
+| Prometheus | http://localhost:30090 | None | Metrics and queries |
+| Alertmanager | http://localhost:30093 | None | Alert management |
+| Traefik | http://localhost:30081 | None | Ingress dashboard |
+| Hubble UI | http://localhost:31235 | None | Cilium/Full mode only |
+| ArgoCD HTTP | http://localhost:30080 | See ArgoCD docs | Full mode only |
+| ArgoCD HTTPS | https://localhost:30443 | See ArgoCD docs | Full mode only |
+
+*Source: README.md:65-75*
+
+## Grafana
+
+### First Login
+
+1. Navigate to http://localhost:30300
+2. Login with:
+   - Username: `admin`
+   - Password: `admin`
+3. You'll be prompted to change password (can skip)
+
+### Available Dashboards
+
+Dashboards are automatically provisioned from `dashboards/src/` using Grafonnet (Jsonnet for Grafana).
+
+Source files:
+- `dashboards/src/k8s-cluster.jsonnet` - Kubernetes cluster metrics
+- `dashboards/src/sample-app.jsonnet` - Sample application metrics
+- `dashboards/src/g.libsonnet` - Shared Grafonnet library
+
+### Create Custom Dashboard
+
+#### Using Grafonnet (Recommended)
+
+1. Create new Jsonnet file:
+   ```bash
+   vim dashboards/src/my-dashboard.jsonnet
+   ```
+
+2. Define dashboard:
+   ```jsonnet
+   local g = import 'g.libsonnet';
+   
+   g.dashboard.new('My Application')
+   + g.dashboard.withUid('my-app')
+   + g.dashboard.time.withFrom('now-1h')
+   + g.dashboard.withPanels([
+     g.panel.timeSeries.new('Request Rate')
+     + g.panel.timeSeries.queryOptions.withTargets([
+       g.query.prometheus.new(
+         'prometheus',
+         'rate(http_requests_total[5m])'
+       ),
+     ])
+     + g.panel.timeSeries.gridPos.withW(12)
+     + g.panel.timeSeries.gridPos.withH(8),
+   ])
+   ```
+
+3. Build dashboards:
+   ```bash
+   cd dashboards
+   jb install  # Install dependencies
+   jsonnet -J vendor src/my-dashboard.jsonnet > dist/my-dashboard.json
+   ```
+
+4. Import via nixidy module or Grafana UI
+
+#### Using Grafana UI
+
+1. Go to http://localhost:30300/dashboard/new
+2. Add panels with queries
+3. Save dashboard
+4. Export JSON: Dashboard settings → JSON Model
+5. (Optional) Convert to Grafonnet for version control
+
+### Explore Metrics
+
+Grafana Explore view: http://localhost:30300/explore
+
+1. Select "Prometheus" data source
+2. Enter PromQL query, e.g.:
+   ```promql
+   rate(container_cpu_usage_seconds_total[5m])
+   ```
+3. Run query to visualize
+
+## Prometheus
+
+### Query Interface
+
+Access Prometheus UI: http://localhost:30090
+
+**Graph view**:
+1. Enter PromQL query
+2. Click "Execute"
+3. View as graph or table
+
+**Example queries**:
+
+```promql
+# CPU usage by pod
+rate(container_cpu_usage_seconds_total{pod!=""}[5m])
+
+# Memory usage by namespace
+sum by (namespace) (container_memory_usage_bytes)
+
+# HTTP request rate
+rate(http_requests_total[5m])
+
+# Pod restart count
+kube_pod_container_status_restarts_total
+```
+
+### Targets and Service Discovery
+
+View discovered targets: http://localhost:30090/targets
+
+Shows:
+- All Kubernetes service monitors
+- Scrape status (UP/DOWN)
+- Last scrape time and duration
+- Error messages
+
+### Alert Rules
+
+View configured alerts: http://localhost:30090/alerts
+
+Shows:
+- Active alerts
+- Alert state (pending, firing)
+- Alert labels and annotations
+
+## Alertmanager
+
+Access: http://localhost:30093
+
+### View Active Alerts
+
+1. Navigate to http://localhost:30093/#/alerts
+2. See all firing alerts
+3. Filter by label (namespace, severity, etc.)
+
+### Silence Alerts
+
+1. Go to "Silences" tab
+2. Click "New Silence"
+3. Add matchers (e.g., `alertname=KubePodCrashLooping`)
+4. Set duration
+5. Add comment
+6. Create silence
+
+### Alert Routing
+
+Configure routing in nixidy module:
+
+```nix
+# nixidy/env/local/kube-prometheus-stack.nix
+alerting = {
+  alertmanagers = [{
+    namespace = "observability";
+    name = "alertmanager";
+    port = 9093;
+  }];
+};
+```
+
+## Loki (Logs)
+
+### Query Logs in Grafana
+
+1. Go to http://localhost:30300/explore
+2. Select "Loki" data source
+3. Enter LogQL query:
+
+```logql
+# All logs from namespace
+{namespace="observability"}
+
+# Logs from specific pod
+{pod="grafana-abc123"}
+
+# Filter by content
+{namespace="microservices"} |= "error"
+
+# JSON field extraction
+{namespace="microservices"} | json | level="error"
+```
+
+### Log Aggregation
+
+Logs are stored in Garage (S3-compatible storage):
+
+- **Retention**: Configured in Loki settings
+- **Backend**: `garage` namespace, S3 API
+- **Chunks**: Compressed and deduplicated
+
+## Tempo (Traces)
+
+### Query Traces in Grafana
+
+1. Go to http://localhost:30300/explore
+2. Select "Tempo" data source
+3. Search by:
+   - Trace ID
+   - Service name
+   - Tags
+   - Duration
+
+### Trace Ingestion
+
+Traces are sent via OpenTelemetry Collector:
+
+**Application** → **OTel Collector** → **Tempo** → **Garage (storage)**
+
+Collector endpoints:
+- OTLP gRPC: `otel-collector.observability:4317`
+- OTLP HTTP: `otel-collector.observability:4318`
+- Jaeger: `otel-collector.observability:14250`
+
+## OpenTelemetry Collector
+
+### Custom Collector Build
+
+The project uses a custom OTel Collector with specific receivers and exporters.
+
+**Build definition**: `otel-collector/`
+
+**Load into cluster**:
+
+```bash
+load-otel-collector-image
+```
+
+This script (scripts/load-otel-collector-image.sh):
+1. Checks for cached image in R2
+2. Downloads or builds collector
+3. Loads into Kind cluster
+
+### Configuration
+
+Collector config is defined in nixidy module:
+
+```nix
+# nixidy/env/local/otel-collector.nix
+receivers = {
+  otlp = {
+    protocols = {
+      grpc = { endpoint = "0.0.0.0:4317"; };
+      http = { endpoint = "0.0.0.0:4318"; };
+    };
+  };
+};
+
+exporters = {
+  otlp/tempo = {
+    endpoint = "tempo.observability:4317";
+    tls.insecure = true;
+  };
+  prometheus = {
+    endpoint = "0.0.0.0:8889";
+  };
+};
+```
+
+## Hubble UI (Cilium Mode)
+
+Available in `bootstrap-full` and `full-bootstrap` modes.
+
+### Access Hubble
+
+**Web UI**: http://localhost:31235
+
+**CLI**:
+
+```bash
+# Observe network flows
+hubble observe -n microservices
+
+# Follow flows in real-time
+hubble observe -n microservices --follow
+
+# Filter by pod
+hubble observe --pod sample-app
+
+# Filter by verdict (FORWARDED, DROPPED)
+hubble observe --verdict DROPPED
+```
+
+### Network Policies
+
+Visualize network policies in Hubble UI:
+
+1. Select namespace
+2. View service map
+3. See allowed/denied connections
+4. Identify policy violations
+
+## Monitoring Workflows
+
+### Investigate High CPU
+
+1. **Check top pods**:
+   ```bash
+   kubectl top pods -A --sort-by=cpu
+   ```
+
+2. **Query Prometheus**:
+   ```promql
+   topk(10, rate(container_cpu_usage_seconds_total[5m]))
+   ```
+
+3. **View in Grafana**:
+   - Open "Kubernetes Cluster" dashboard
+   - Filter by namespace
+   - Drill down to pod
+
+### Debug Application Errors
+
+1. **Check logs in Loki**:
+   ```logql
+   {namespace="microservices", app="sample-app"} |= "error"
+   ```
+
+2. **View traces in Tempo**:
+   - Find trace ID from logs
+   - Search in Tempo
+   - Analyze span duration
+
+3. **Check metrics**:
+   ```promql
+   rate(http_requests_total{status=~"5.."}[5m])
+   ```
+
+### Alert on Condition
+
+1. **Test query in Prometheus**:
+   ```promql
+   rate(http_requests_total{status="500"}[5m]) > 0.1
+   ```
+
+2. **Create PrometheusRule** in nixidy:
+   ```nix
+   prometheusRules.myapp = {
+     groups = [{
+       name = "myapp";
+       rules = [{
+         alert = "HighErrorRate";
+         expr = ''rate(http_requests_total{status="500"}[5m]) > 0.1'';
+         for = "5m";
+         annotations = {
+           summary = "High 500 error rate";
+         };
+       }];
+     }];
+   };
+   ```
+
+3. **Apply and verify**:
+   ```bash
+   gen-manifests
+   kubectl apply -f manifests/kube-prometheus-stack/
+   ```
+
+## Troubleshooting
+
+### Grafana Won't Load
+
+Check pod status:
+
+```bash
+kubectl get pods -n observability -l app.kubernetes.io/name=grafana
+kubectl logs -n observability -l app.kubernetes.io/name=grafana
+```
+
+### Prometheus Not Scraping
+
+1. Check targets: http://localhost:30090/targets
+2. Look for service monitors:
+   ```bash
+   kubectl get servicemonitor -A
+   ```
+3. Verify Prometheus config:
+   ```bash
+   kubectl get prometheus -n observability -o yaml
+   ```
+
+### Loki Queries Timeout
+
+Check Loki pod:
+
+```bash
+kubectl logs -n observability -l app.kubernetes.io/name=loki
+```
+
+Verify Garage connection:
+
+```bash
+kubectl get pods -n storage
+```
+
+### Missing Dashboards
+
+Regenerate and apply:
+
+```bash
+gen-manifests
+kubectl apply -f manifests/kube-prometheus-stack/
+kubectl rollout restart deployment/grafana -n observability
+```

@@ -1,0 +1,321 @@
+---
+title: PostgreSQL
+description: Relational database for microservices with metrics monitoring
+---
+
+## Overview
+
+PostgreSQL provides a shared relational database for microservices. It's deployed with automatic database provisioning for each service and Prometheus metrics integration.
+
+## Configuration
+
+### Nixidy Module (`nixidy/env/local/postgresql.nix`)
+
+```nix
+applications.postgresql = {
+  namespace = "database";
+  createNamespace = true;
+  
+  helm.releases.postgresql = {
+    chart = charts.bitnami.postgresql;
+    values = {
+      auth = {
+        username = "devuser";
+        password = "devpass";
+        database = "postgres";
+      };
+      primary = {
+        initdb.scripts = {
+          "create-databases.sql" = ''
+            CREATE DATABASE auth_db;
+            CREATE DATABASE lang_db;
+            CREATE DATABASE greeter_db;
+            CREATE DATABASE caller_db;
+            CREATE DATABASE gateway_db;
+            GRANT ALL PRIVILEGES ON DATABASE auth_db TO devuser;
+            GRANT ALL PRIVILEGES ON DATABASE lang_db TO devuser;
+            GRANT ALL PRIVILEGES ON DATABASE greeter_db TO devuser;
+            GRANT ALL PRIVILEGES ON DATABASE caller_db TO devuser;
+            GRANT ALL PRIVILEGES ON DATABASE gateway_db TO devuser;
+          '';
+        };
+        persistence = {
+          enabled = true;
+          size = "2Gi";
+        };
+      };
+      metrics = {
+        enabled = true;
+        serviceMonitor = {
+          enabled = true;
+          namespace = "database";
+        };
+      };
+    };
+  };
+};
+```
+
+## Deployment
+
+PostgreSQL runs as a StatefulSet in the `database` namespace:
+
+- **Chart**: Bitnami PostgreSQL
+- **Replicas**: 1 (primary only, no replicas)
+- **Namespace**: `database`
+- **Persistence**: 2Gi PVC
+
+## Authentication
+
+### Default Credentials (Development)
+
+- **Username**: `devuser`
+- **Password**: `devpass`
+- **Default database**: `postgres`
+
+**Warning**: These are hardcoded for local development. Use secrets management for production.
+
+### Connection String
+
+```
+postgresql://devuser:devpass@postgresql.database:5432/<database_name>
+```
+
+## Database Provisioning
+
+Databases are automatically created via initdb scripts:
+
+```sql
+CREATE DATABASE auth_db;
+CREATE DATABASE lang_db;
+CREATE DATABASE greeter_db;
+CREATE DATABASE caller_db;
+CREATE DATABASE gateway_db;
+GRANT ALL PRIVILEGES ON DATABASE auth_db TO devuser;
+-- ...
+```
+
+### Service Databases
+
+| Database | Service | Purpose |
+|---|---|---|
+| `auth_db` | auth-service | User authentication |
+| `lang_db` | language-service | Language/i18n data |
+| `greeter_db` | greeter-service | Greeter service state |
+| `caller_db` | caller-service | Caller service state |
+| `gateway_db` | gateway-service | API gateway state |
+
+All databases are owned by `devuser` with full privileges.
+
+## Persistence
+
+```yaml
+primary:
+  persistence:
+    enabled: true
+    size: 2Gi
+    accessModes: [ReadWriteOnce]
+```
+
+- **Size**: 2Gi (sufficient for local development)
+- **Access mode**: ReadWriteOnce (single node)
+- **Storage class**: Cluster default
+
+## Observability
+
+### Metrics
+
+PostgreSQL metrics are exported and scraped by Prometheus:
+
+```yaml
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: database
+```
+
+### Metrics Exporter
+
+The Bitnami chart includes `postgres_exporter`, which provides:
+
+- Connection pool stats
+- Query performance
+- Database size
+- Table/index statistics
+- Replication lag (if replicas enabled)
+- Transaction rates
+- Lock statistics
+
+### ServiceMonitor
+
+Prometheus automatically discovers PostgreSQL metrics:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: postgresql
+  namespace: database
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+  endpoints:
+    - port: metrics
+```
+
+### Grafana Dashboards
+
+PostgreSQL metrics can be visualized in Grafana:
+
+```promql
+# Connection count
+pg_stat_database_numbackends
+
+# Query rate
+rate(pg_stat_database_xact_commit[5m])
+
+# Database size
+pg_database_size_bytes
+```
+
+## Service Endpoint
+
+- **Internal URL**: `postgresql.database:5432`
+- **Namespace**: `database`
+- **Protocol**: PostgreSQL wire protocol
+
+## Client Configuration
+
+### Go (pgx)
+
+```go
+dsn := "postgresql://devuser:devpass@postgresql.database:5432/auth_db"
+conn, err := pgx.Connect(context.Background(), dsn)
+```
+
+### Node.js (pg)
+
+```javascript
+const { Client } = require('pg');
+const client = new Client({
+  host: 'postgresql.database',
+  port: 5432,
+  user: 'devuser',
+  password: 'devpass',
+  database: 'lang_db'
+});
+await client.connect();
+```
+
+## High Availability
+
+Local deployment uses single primary (no HA):
+
+```yaml
+primary.replicas: 1
+readReplicas.replicas: 0
+```
+
+For production, enable:
+- Read replicas
+- Replication
+- Automatic failover
+- Backup/restore
+
+## Schema Management
+
+### Migrations
+
+Migrations are handled by application services:
+- **Go services**: migrate, goose, or embedded migrations
+- **Node.js services**: knex, sequelize, or typeorm
+
+### Init Scripts
+
+Additional init scripts can be added:
+
+```nix
+initdb.scripts = {
+  "01-create-extensions.sql" = ''
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+  '';
+  "02-create-databases.sql" = ...;
+};
+```
+
+Scripts run in lexicographical order.
+
+## Backup & Restore
+
+### Manual Backup
+
+```bash
+kubectl exec -n database postgresql-0 -- \
+  pg_dump -U devuser auth_db > auth_db.sql
+```
+
+### Restore
+
+```bash
+kubectl exec -i -n database postgresql-0 -- \
+  psql -U devuser auth_db < auth_db.sql
+```
+
+### Automated Backups
+
+For production, configure:
+- WAL archiving
+- Point-in-time recovery (PITR)
+- pg_basebackup to S3
+
+## Troubleshooting
+
+### Check Logs
+
+```bash
+kubectl logs -n database postgresql-0
+```
+
+### Connect to psql
+
+```bash
+kubectl exec -it -n database postgresql-0 -- \
+  psql -U devuser -d postgres
+```
+
+### Check Database Size
+
+```sql
+SELECT pg_database.datname, pg_size_pretty(pg_database_size(pg_database.datname))
+FROM pg_database;
+```
+
+### Connection Count
+
+```sql
+SELECT count(*) FROM pg_stat_activity;
+```
+
+## Resource Limits
+
+Default resource requests/limits from Bitnami chart:
+
+```yaml
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 250m
+  limits:
+    memory: 512Mi
+```
+
+Adjust based on workload requirements.
+
+## Related Components
+
+- [Prometheus](/components/prometheus) - Metrics collection
+- [Grafana](/components/grafana) - Database metrics visualization
+- Microservices - Database clients (in separate repository)

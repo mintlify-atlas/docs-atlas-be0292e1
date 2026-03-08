@@ -1,0 +1,248 @@
+---
+title: Prerequisites
+description: System requirements and tools needed to run the microservice infrastructure platform
+---
+
+Before you can set up the microservice infrastructure platform, you'll need to install the required tools and verify your system meets the minimum requirements.
+
+## System Requirements
+
+This platform runs a Kubernetes cluster locally using Kind (Kubernetes in Docker), along with a full observability stack including Prometheus, Grafana, Loki, and Tempo. Your system should have:
+
+- **Operating System**: Linux, macOS (Intel/Apple Silicon), or Windows with WSL2
+- **Memory**: At least 8GB RAM recommended (16GB+ for full-stack mode)
+- **Disk Space**: 10GB+ free space for container images and cluster data
+- **CPU**: Multi-core processor recommended for running multiple containers
+
+## Required Tools
+
+### Nix with Flakes
+
+Nix is the primary package manager used for this project. It ensures reproducible builds and consistent development environments across all platforms.
+
+**Installation:**
+
+```bash
+# Install Nix (single-user installation)
+curl -L https://nixos.org/nix/install | sh -s -- --daemon
+
+# Enable flakes (required)
+mkdir -p ~/.config/nix
+echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
+```
+
+<Note>
+The project uses Nix flakes (`flake.nix` and `flake.lock`) to manage dependencies and ensure reproducible builds. Flakes support is essential for this project.
+</Note>
+
+**Verify installation:**
+
+```bash
+nix --version
+# Should output: nix (Nix) 2.x.x or later
+```
+
+### direnv
+
+direnv automatically loads the development environment when you enter the project directory, making all tools available in your PATH.
+
+**Installation:**
+
+```bash
+# On macOS
+brew install direnv
+
+# On Linux (using package manager)
+# Debian/Ubuntu
+sudo apt install direnv
+
+# Arch Linux
+sudo pacman -S direnv
+
+# Or via Nix
+nix profile install nixpkgs#direnv
+```
+
+**Setup shell hook:**
+
+Add the following to your shell configuration file:
+
+<CodeGroup>
+
+```bash ~/.bashrc
+eval "$(direnv hook bash)"
+```
+
+```zsh ~/.zshrc
+eval "$(direnv hook zsh)"
+```
+
+```fish ~/.config/fish/config.fish
+direnv hook fish | source
+```
+
+</CodeGroup>
+
+**Verify installation:**
+
+```bash
+direnv version
+# Should output: 2.x.x or later
+```
+
+### Docker
+
+Docker is required for Kind to create the Kubernetes cluster. The platform creates containers that run Kubernetes nodes locally.
+
+**Installation:**
+
+<CodeGroup>
+
+```bash macOS
+# Install Docker Desktop for Mac
+# Download from: https://www.docker.com/products/docker-desktop
+
+# Or via Homebrew
+brew install --cask docker
+```
+
+```bash Linux
+# Ubuntu/Debian
+sudo apt update
+sudo apt install docker.io docker-compose
+
+# Start and enable Docker service
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Add your user to docker group (to run without sudo)
+sudo usermod -aG docker $USER
+# Log out and back in for this to take effect
+```
+
+```bash Windows (WSL2)
+# Install Docker Desktop for Windows with WSL2 backend
+# Download from: https://www.docker.com/products/docker-desktop
+
+# Ensure WSL2 integration is enabled in Docker Desktop settings
+```
+
+</CodeGroup>
+
+**Verify installation:**
+
+```bash
+docker --version
+# Should output: Docker version 20.x.x or later
+
+docker ps
+# Should list running containers (or be empty if none running)
+```
+
+<Note>
+On Linux, make sure your user is in the `docker` group to run Docker commands without sudo. You may need to log out and back in after adding yourself to the group.
+</Note>
+
+## Development Environment Tools
+
+Once you have Nix, direnv, and Docker installed, the project's development environment (via `devenv`) will automatically provide these additional tools:
+
+- **kubectl** - Kubernetes command-line tool
+- **kind** - Kubernetes in Docker
+- **helm** - Kubernetes package manager
+- **argocd** - ArgoCD CLI
+- **cilium-cli** - Cilium CLI (for Cilium mode)
+- **hubble** - Hubble CLI (for network observability)
+- **istioctl** - Istio service mesh CLI
+- **sops** & **age** - Secret management tools
+- **skopeo** - Container image operations
+- **cloudflared** - Cloudflare Tunnel CLI
+
+These tools are automatically installed and made available when you run `direnv allow` in the project directory.
+
+## Enabling the Development Environment
+
+After installing the prerequisites, navigate to the project directory and enable direnv:
+
+```bash
+cd /path/to/microservice-infra
+direnv allow
+```
+
+You should see output indicating that the development environment is being loaded:
+
+```
+direnv: loading ~/microservice-infra/.envrc
+...
+microservice-infra dev environment loaded
+
+Available commands:
+  cluster-up       : Create kind cluster
+  cluster-down     : Destroy kind cluster
+  bootstrap        : Dev-fast setup (kindnetd, warm cluster, single node)
+  bootstrap-full   : Full setup with Cilium (parity mode)
+  ...
+```
+
+<Note>
+The first time you run `direnv allow`, Nix will download and build all required dependencies. This may take 10-15 minutes depending on your internet connection and system speed. Subsequent loads will be much faster as everything is cached.
+</Note>
+
+## Verifying Your Setup
+
+Once the development environment loads, verify that all tools are available:
+
+```bash
+# Check Kubernetes tools
+kubectl version --client
+kind version
+
+# Check Helm
+helm version
+
+# Check Docker
+docker ps
+```
+
+If all commands execute successfully, you're ready to proceed to the [Quickstart](/quickstart) guide.
+
+## Troubleshooting
+
+### Nix flakes not enabled
+
+If you see an error about experimental features, ensure flakes are enabled:
+
+```bash
+mkdir -p ~/.config/nix
+echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
+```
+
+### direnv not loading automatically
+
+Make sure you've added the direnv hook to your shell configuration and restarted your shell:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+eval "$(direnv hook bash)"  # or zsh, fish, etc.
+```
+
+### Docker permission denied
+
+On Linux, if you get permission errors running Docker commands:
+
+```bash
+# Add your user to the docker group
+sudo usermod -aG docker $USER
+
+# Log out and back in, then verify
+groups | grep docker
+```
+
+### WSL2 Docker issues
+
+On Windows with WSL2, ensure Docker Desktop's WSL2 integration is enabled:
+
+1. Open Docker Desktop
+2. Go to Settings → Resources → WSL Integration
+3. Enable integration with your WSL2 distribution
+4. Click "Apply & Restart"

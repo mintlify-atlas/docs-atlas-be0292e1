@@ -1,0 +1,216 @@
+---
+title: Traefik
+description: Modern HTTP reverse proxy and ingress controller with middleware
+---
+
+## Overview
+
+Traefik serves as the edge proxy and ingress controller, routing external HTTP/HTTPS traffic to services within the cluster. It provides middleware for CORS, rate limiting, and authentication.
+
+## Configuration
+
+### Nixidy Module (`nixidy/env/local/traefik.nix`)
+
+Traefik is deployed in the `edge` namespace via Helm:
+
+```nix
+applications.traefik = {
+  namespace = "edge";
+  createNamespace = true;
+  
+  helm.releases.traefik = {
+    chart = charts.traefik.traefik;
+    values = {
+      image.tag = "v3.6.9";
+      service = {
+        type = "NodePort";
+        spec.externalTrafficPolicy = "Cluster";
+      };
+      ports = {
+        web.nodePort = 30081;
+        websecure.nodePort = 30444;
+      };
+    };
+  };
+};
+```
+
+## Ports & Access
+
+| Port | Protocol | EntryPoint | Purpose |
+|---|---|---|---|
+| 30081 | HTTP | `web` | HTTP traffic |
+| 30444 | HTTPS | `websecure` | HTTPS traffic |
+
+**Access**: Services are routed through http://localhost:30081
+
+## Providers
+
+Traefik is configured with multiple providers:
+
+```yaml
+providers:
+  kubernetesCRD.enabled: true   # Traefik CRDs (IngressRoute, etc.)
+  kubernetesIngress.enabled: true  # Standard Ingress resources
+```
+
+## OpenTelemetry Tracing
+
+Traefik sends traces to the OTel Collector:
+
+```yaml
+tracing:
+  otlp:
+    grpc:
+      enabled: true
+      endpoint: "otel-collector.observability:4317"
+      insecure: true
+```
+
+**Tracing Flow**: Traefik → OTel Collector → Tempo
+
+## Middleware
+
+Traefik includes custom middleware for common concerns:
+
+### CORS Middleware
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: cors-middleware
+  namespace: microservices
+spec:
+  headers:
+    accessControlAllowMethods: [GET, POST, OPTIONS]
+    accessControlAllowHeaders:
+      - Content-Type
+      - Authorization
+      - Connect-Protocol-Version
+      - Grpc-Timeout
+      - X-Grpc-Web
+    accessControlAllowOriginList: ["http://localhost:5173"]
+    accessControlExposeHeaders:
+      - Grpc-Status
+      - Grpc-Message
+    accessControlMaxAge: 7200
+    addVaryHeader: true
+```
+
+**Purpose**: Enables frontend (localhost:5173) to call backend APIs with proper CORS headers.
+
+### Rate Limit Middleware
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit-middleware
+  namespace: microservices
+spec:
+  rateLimit:
+    average: 100  # requests per second
+    burst: 50     # burst capacity
+```
+
+**Purpose**: Prevents API abuse by limiting request rates.
+
+## IngressRoutes
+
+Traefik uses IngressRoute CRDs to define routing:
+
+### Greeter Service (gRPC-Web)
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: greeter-route
+  namespace: microservices
+spec:
+  entryPoints: [web]
+  routes:
+    - match: PathPrefix(`/greeter.v1.GreeterService`)
+      kind: Rule
+      priority: 100
+      middlewares:
+        - name: cors-middleware
+        - name: rate-limit-middleware
+      services:
+        - name: greeter-service
+          port: 80
+          scheme: h2c  # HTTP/2 cleartext for gRPC
+```
+
+### Gateway Service
+
+```yaml
+match: PathPrefix(`/gateway.v1.GatewayService`)
+services:
+  - name: gateway
+    port: 8082
+    scheme: h2c
+```
+
+### Auth Service (HTTP)
+
+```yaml
+match: PathPrefix(`/auth`)
+services:
+  - name: auth-service
+    port: 8090
+```
+
+### Frontend (Catch-all)
+
+```yaml
+match: PathPrefix(`/`)
+priority: 1  # Lowest priority - catches everything else
+services:
+  - name: frontend
+    port: 80
+```
+
+## Route Priority
+
+Routes are evaluated by priority (higher number = higher priority):
+
+1. **Priority 100**: API services (greeter, gateway)
+2. **Priority 90**: Auth service
+3. **Priority 1**: Frontend (catch-all)
+
+This ensures API paths are matched before falling through to the frontend SPA.
+
+## Integration
+
+### Istio Service Mesh
+
+Traefik routes external traffic into the cluster, then Istio mesh handles internal service-to-service communication.
+
+### OpenTelemetry
+
+Traefik spans are sent to the OTel Collector and stored in Tempo, providing end-to-end tracing from ingress to backend services.
+
+### Microservices
+
+All backend services (greeter, gateway, auth, frontend) are exposed through Traefik routes.
+
+## Observability
+
+- **Logs**: INFO level (configurable in nixidy module)
+- **Metrics**: Prometheus-compatible metrics endpoint
+- **Traces**: OpenTelemetry gRPC to `otel-collector.observability:4317`
+
+## Custom Resource Definitions
+
+Traefik installs multiple CRDs:
+
+- **IngressRoute** - HTTP routing
+- **IngressRouteTCP** - TCP routing
+- **IngressRouteUDP** - UDP routing
+- **Middleware** - Request/response transformation
+- **TLSOption** - TLS configuration
+- **TraefikService** - Weighted routing, mirroring
+
+And many more for advanced features like API Gateway, rate limiting, and access control.

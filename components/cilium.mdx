@@ -1,0 +1,109 @@
+---
+title: Cilium CNI
+description: eBPF-based networking and security with Hubble observability
+---
+
+## Overview
+
+Cilium serves as the Container Network Interface (CNI) for the Kubernetes cluster, providing eBPF-based networking, security, and observability. It's configured to coexist with Istio service mesh in ambient mode.
+
+## Installation
+
+Cilium is installed via the `cilium-install.sh` script using Helm with OCI chart registry:
+
+```bash
+helm upgrade --install cilium oci://quay.io/cilium/charts/cilium \
+  --version "${CILIUM_VERSION}" \
+  --namespace kube-system
+```
+
+## Configuration
+
+### Istio Coexistence
+
+Cilium is specifically configured to work alongside Istio:
+
+| Setting | Value | Purpose |
+|---|---|---|
+| `cni.exclusive` | `false` | Allows CNI plugin chaining with Istio |
+| `socketLB.hostNamespaceOnly` | `true` | Prevents interference with Istio traffic redirection |
+| `kubeProxyReplacement` | `false` | Safe coexistence with Istio |
+
+### Core Settings
+
+```yaml
+image.pullPolicy: IfNotPresent
+ipam.mode: kubernetes
+```
+
+- **IPAM Mode**: Uses Kubernetes native IP address management
+- **Pull Policy**: Caches images locally for faster startup
+
+## Hubble Observability
+
+Hubble provides deep network visibility and is fully enabled:
+
+```yaml
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+    service:
+      type: NodePort
+      nodePort: 31235
+```
+
+### Accessing Hubble UI
+
+Hubble UI is exposed on **http://localhost:31235** and provides:
+
+- Network flow visualization
+- Service dependency maps
+- DNS queries and HTTP requests
+- Network policy enforcement
+
+## Deployment
+
+Cilium runs as a DaemonSet in the `kube-system` namespace, ensuring one pod per node.
+
+### Readiness Check
+
+The installation script waits for the DaemonSet to be ready:
+
+```bash
+kubectl rollout status -n kube-system ds/cilium --timeout=300s
+```
+
+## Integration with Other Components
+
+### Istio Service Mesh
+
+Cilium's CNI plugin chains with Istio's CNI, allowing:
+- Istio to handle L7 traffic policies
+- Cilium to provide L3/L4 networking
+- Both to share the same pod network
+
+### Hubble Relay
+
+Hubble relay aggregates flows from all Cilium agents, providing cluster-wide visibility.
+
+## Network Features
+
+- **eBPF-based datapath** for high-performance networking
+- **Network policy enforcement** at L3/L4/L7
+- **Service load balancing**
+- **Transparent encryption** (optional)
+- **Multi-cluster routing** (when enabled)
+
+## Observability
+
+Hubble provides observability for:
+- Network flows between pods
+- DNS resolution
+- HTTP/gRPC requests
+- Network policy drops
+- TCP connection tracking
+
+This data integrates with Prometheus and Grafana for long-term metrics storage.

@@ -1,0 +1,303 @@
+---
+title: Manifest Generation
+description: Generate Kubernetes manifests using nixidy and Nix
+---
+
+## Overview
+
+The project uses [nixidy](https://github.com/arnarg/nixidy) to generate Kubernetes manifests from Nix expressions. This approach provides type safety, modularity, and deterministic builds.
+
+## Quick Start
+
+Regenerate all manifests:
+
+```bash
+gen-manifests
+```
+
+Watch for changes and auto-apply:
+
+```bash
+watch-manifests
+```
+
+## How Manifest Generation Works
+
+### Build Process
+
+The `gen-manifests` script (scripts/gen-manifests.sh:10-22):
+
+1. **Build nixidy environment package**:
+   ```bash
+   nix build "#legacyPackages.${PLATFORM}.nixidyEnvs.local.environmentPackage" \
+     -o manifests-result
+   ```
+
+2. **Copy to manifests directory**:
+   ```bash
+   rm -rf manifests/
+   cp -rL manifests-result manifests/
+   chmod -R u+w manifests/
+   ```
+
+3. **Remove ArgoCD self-management app**:
+   ```bash
+   rm -f manifests/apps/Application-argocd.yaml
+   ```
+
+4. **Show diff**:
+   ```bash
+   git diff --stat -- manifests/
+   ```
+
+### Output Structure
+
+Generated manifests are organized by application:
+
+```
+manifests/
+├── apps/                    # ArgoCD Application definitions
+│   ├── Application-garage.yaml
+│   ├── Application-kube-prometheus-stack.yaml
+│   ├── Application-loki.yaml
+│   └── ...
+├── argocd/                  # ArgoCD core resources
+│   ├── Namespace-argocd.yaml
+│   ├── Deployment-argocd-server.yaml
+│   └── ...
+├── garage/                  # Object storage
+├── kube-prometheus-stack/  # Monitoring stack
+├── loki/                   # Log aggregation
+├── tempo/                  # Distributed tracing
+├── otel-collector/         # OpenTelemetry
+├── traefik/                # Ingress controller
+└── postgresql/             # Database
+```
+
+## Nixidy Module Structure
+
+### Environment Definition
+
+The environment is defined in `nixidy/env/local.nix`:
+
+```nix
+{
+  imports = [
+    ./local/argocd.nix
+    ./local/garage.nix
+    ./local/kube-prometheus-stack.nix
+    ./local/loki.nix
+    ./local/tempo.nix
+    ./local/otel-collector.nix
+    ./local/sample-app.nix
+    ./local/traefik.nix
+    ./local/grafana-dashboards.nix
+    ./local/image-updater.nix
+    ./local/cloudflared.nix
+    ./local/postgresql.nix
+  ];
+
+  nixidy = {
+    target = {
+      repository = "https://github.com/thirdlf03/microservice-infra";
+      branch = "main";
+      rootPath = "./manifests";
+    };
+
+    defaults = {
+      destination.server = "https://kubernetes.default.svc";
+      syncPolicy = {
+        autoSync = {
+          enable = true;
+          prune = true;
+          selfHeal = true;
+        };
+      };
+    };
+
+    appOfApps = {
+      name = "apps";
+      namespace = "argocd";
+    };
+  };
+}
+```
+
+### Application Modules
+
+Each application has its own module in `nixidy/env/local/`, for example:
+
+- `argocd.nix` - GitOps controller
+- `garage.nix` - S3-compatible storage
+- `kube-prometheus-stack.nix` - Prometheus + Grafana + Alertmanager
+- `loki.nix` - Log aggregation
+- `tempo.nix` - Distributed tracing backend
+- `traefik.nix` - Ingress with middleware
+- `postgresql.nix` - Relational database
+
+### Helm Chart Integration
+
+Nixidy integrates with nixhelm for Helm chart management:
+
+```nix
+# Example from a module
+applications.prometheus = {
+  namespace = "observability";
+  helm.charts.kube-prometheus-stack = {
+    name = "kube-prometheus-stack";
+    repo = "https://prometheus-community.github.io/helm-charts";
+    version = "65.0.0";
+    chartHash = "sha256:...";
+  };
+};
+```
+
+## Live Reloading with watch-manifests
+
+The `watch-manifests` command (devenv.nix:107-110) provides automatic rebuild and apply:
+
+```bash
+watchexec --exts nix --restart -- bash -lc \
+  'bash scripts/gen-manifests.sh && kubectl apply -f manifests/'
+```
+
+**Behavior**:
+- Watches all `.nix` files in the repository
+- On change: rebuilds manifests and applies to cluster
+- Restarts on each change (kills previous run)
+- Useful for rapid iteration on nixidy modules
+
+**Usage**:
+
+```bash
+# Start watching
+watch-manifests
+
+# Edit nixidy/env/local/traefik.nix
+# Manifests automatically regenerate and apply
+```
+
+## Validation and Testing
+
+### Quick Nix Check
+
+Validate Nix expressions without building:
+
+```bash
+nix-check
+```
+
+This evaluates (devenv.nix:111-117):
+```bash
+nix eval ".#legacyPackages.${SYSTEM}.nixidyEnvs.local.environmentPackage"
+```
+
+### Full Flake Check
+
+Run all flake checks:
+
+```bash
+nix flake check
+```
+
+## Common Workflows
+
+### Add a New Application
+
+1. Create module in `nixidy/env/local/myapp.nix`
+2. Add import to `nixidy/env/local.nix`
+3. Generate manifests:
+   ```bash
+   gen-manifests
+   ```
+4. Review changes:
+   ```bash
+   git diff manifests/
+   ```
+5. Apply:
+   ```bash
+   kubectl apply -f manifests/myapp/
+   ```
+
+### Update Helm Chart Version
+
+1. Edit version in `nixidy/env/local/myapp.nix`
+2. Run `fix-chart-hash` to update chartHash automatically
+3. Generate manifests:
+   ```bash
+   gen-manifests
+   ```
+4. Test in cluster:
+   ```bash
+   bootstrap
+   ```
+
+### Debug Manifest Generation
+
+```bash
+# See full build output
+nix build ".#legacyPackages.$(nix eval --raw --impure --expr 'builtins.currentSystem').nixidyEnvs.local.environmentPackage" --print-build-logs
+
+# Inspect result
+ls -la manifests-result/
+
+# Check specific manifest
+cat manifests-result/traefik/Deployment-traefik.yaml
+```
+
+## Benefits of Nixidy
+
+### Type Safety
+
+Nix provides compile-time validation of manifest structure, catching errors before deployment.
+
+### Deterministic Builds
+
+Same inputs always produce identical manifests. Chart hashes ensure reproducibility.
+
+### Modularity
+
+Each application is a self-contained module that can be imported, overridden, or excluded.
+
+### GitOps Integration
+
+Generated manifests are committed to Git, providing:
+- Full audit trail of changes
+- Easy rollbacks
+- Clear diff reviews
+
+## Troubleshooting
+
+### Build Fails with Hash Mismatch
+
+Update chart hash:
+
+```bash
+fix-chart-hash
+```
+
+### Watch-manifests Not Triggering
+
+Check that watchexec is installed:
+
+```bash
+which watchexec
+```
+
+Ensure you're editing `.nix` files (other extensions are ignored).
+
+### Manifests Not Applying
+
+Check manifest validity:
+
+```bash
+kubectl apply --dry-run=client -f manifests/myapp/
+```
+
+### Nix Evaluation Fails
+
+Run verbose check:
+
+```bash
+nix eval ".#legacyPackages.$(nix eval --raw --impure --expr 'builtins.currentSystem').nixidyEnvs.local.environmentPackage" --show-trace
+```

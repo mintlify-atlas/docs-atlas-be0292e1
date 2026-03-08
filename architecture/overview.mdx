@@ -1,0 +1,249 @@
+---
+title: Architecture Overview
+description: High-level architecture of the microservice infrastructure platform
+---
+
+This microservice infrastructure platform provides a complete, production-ready Kubernetes environment with comprehensive observability, networking, and GitOps capabilities. Built on Kind for local development, it demonstrates enterprise-grade patterns suitable for both development and production deployment.
+
+## Architecture Stack
+
+The platform is organized into distinct layers, each providing specific capabilities:
+
+| Layer | Components | Purpose |
+|-------|------------|----------|
+| **Kubernetes** | Kind | Local Kubernetes cluster for development |
+| **CNI** | Cilium + Hubble UI | eBPF-based networking and observability |
+| **Service Mesh** | Istio (ambient mode) | L7 traffic management without sidecars |
+| **GitOps** | ArgoCD + ApplicationSet | Declarative, Git-driven deployment |
+| **Ingress** | Traefik | Edge routing with middleware (CORS, auth, rate-limit) |
+| **Observability** | Prometheus, Grafana, Loki, Tempo, OTel Collector | Full metrics, logs, and traces |
+| **Storage** | Garage (S3-compatible) | Object storage backend for Loki/Tempo |
+| **Database** | PostgreSQL | Relational database for applications |
+| **Manifest Generation** | Nixidy (Nix + Kustomize) | Type-safe, reproducible manifest generation |
+
+## Design Principles
+
+### 1. Infrastructure as Code
+
+All infrastructure is defined declaratively using:
+
+- **Nix flakes** for reproducible development environments and builds
+- **Nixidy** for type-safe Kubernetes manifest generation
+- **Git** as the single source of truth for all configuration
+
+The `flake.nix` defines all dependencies and build outputs:
+
+```nix
+inputs = {
+  nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  nixidy.url = "github:arnarg/nixidy";
+  nixhelm.url = "github:farcaller/nixhelm";
+  opentelemetry-nix.url = "github:FriendsOfOpenTelemetry/opentelemetry-nix";
+};
+```
+
+### 2. Observability First
+
+The platform implements the three pillars of observability:
+
+- **Metrics**: Prometheus with remote write receiver for OTel metrics
+- **Logs**: Loki with S3 backend for long-term storage
+- **Traces**: Tempo with exemplars linked to metrics and logs
+
+All components are pre-wired in Grafana with trace-to-logs and trace-to-metrics correlation.
+
+### 3. Security by Default
+
+Security is built into every layer:
+
+- **Network policies**: Cilium enforces zero-trust networking
+- **mTLS**: Istio provides automatic mutual TLS between services
+- **JWT authentication**: Istio validates tokens at the waypoint proxy
+- **Secrets management**: SOPS with age encryption for sensitive data
+
+### 4. Developer Experience
+
+The platform optimizes for fast iteration:
+
+- **Warm cluster support**: Hash-based detection skips redundant rebuilds
+- **Parallel execution**: Independent operations run concurrently
+- **Multiple profiles**: Dev-fast (kindnetd), Full (Cilium), and Complete (Cilium + Istio)
+- **Hot reload**: Watch mode for automatic manifest regeneration
+
+## Component Interactions
+
+### Data Flow: Request Path
+
+```
+Client Request
+  ↓
+Cloudflare Tunnel (optional)
+  ↓
+Traefik Ingress (edge namespace)
+  ↓ (L4 routing)
+Istio Ambient Mesh (ztunnel)
+  ↓ (L4 encryption)
+Istio Waypoint Proxy (microservices namespace)
+  ↓ (L7 policies: JWT auth, retries, circuit breaking)
+Application Pod
+```
+
+### Data Flow: Observability
+
+```
+Application
+  ↓ (OTLP)
+OpenTelemetry Collector
+  ├─→ Prometheus (metrics via remote write)
+  ├─→ Loki (logs via OTLP HTTP)
+  └─→ Tempo (traces via OTLP gRPC)
+      ↓
+    Garage S3 (long-term storage)
+      ↓
+    Grafana (unified query interface)
+```
+
+### Data Flow: GitOps
+
+```
+Nixidy Modules (nixidy/env/local/*.nix)
+  ↓
+Nix Build (type-checked manifests)
+  ↓
+manifests-result/ (generated YAML)
+  ↓
+kubectl apply (bootstrap) OR ArgoCD sync (production)
+  ↓
+Kubernetes API
+  ↓
+Running Applications
+```
+
+## Bootstrap Modes
+
+The platform supports three bootstrap modes optimized for different use cases:
+
+### Dev-Fast Mode (Default)
+
+```bash
+bootstrap
+```
+
+- **CNI**: kindnetd (built-in)
+- **Nodes**: 1 control-plane
+- **Service Mesh**: None
+- **Time**: ~120s cold, instant warm
+- **Use case**: Rapid application development
+
+### Cilium Mode
+
+```bash
+bootstrap-full
+```
+
+- **CNI**: Cilium with Hubble UI
+- **Nodes**: 1 control-plane + 1 worker
+- **Service Mesh**: None
+- **Time**: ~200s cold
+- **Use case**: Testing eBPF networking and observability
+
+### Full Mode
+
+```bash
+full-bootstrap
+```
+
+- **CNI**: Cilium with Hubble UI
+- **Nodes**: 1 control-plane + 2 workers
+- **Service Mesh**: Istio ambient mode
+- **Time**: ~300s cold
+- **Use case**: Production-like environment with full L7 capabilities
+
+## Port Mappings
+
+All services are exposed via NodePort on the control-plane node:
+
+| Port | Service | Available In |
+|------|---------|-------------|
+| 30081 | Traefik HTTP | All modes |
+| 30090 | Prometheus | All modes |
+| 30093 | Alertmanager | All modes |
+| 30300 | Grafana (admin/admin) | All modes |
+| 31235 | Hubble UI | Cilium, Full |
+| 30080 | ArgoCD HTTP | Full (with ArgoCD) |
+| 30443 | ArgoCD HTTPS | Full (with ArgoCD) |
+
+## Technology Choices
+
+### Why Cilium?
+
+Cilium provides eBPF-based networking with significant advantages:
+
+- **Performance**: Kernel-level packet processing without iptables overhead
+- **Visibility**: Hubble UI shows real-time network flows and policies
+- **Security**: Identity-based network policies independent of IP addresses
+- **Compatibility**: Co-exists with Istio for combined L3/L4 + L7 capabilities
+
+### Why Istio Ambient Mode?
+
+Ambient mode eliminates sidecar proxies while maintaining L7 capabilities:
+
+- **Resource efficiency**: Shared ztunnel DaemonSet vs. per-pod sidecars
+- **Operational simplicity**: No init containers or pod mutation
+- **Selective L7**: Waypoint proxies only where needed
+- **mTLS everywhere**: Automatic encryption at L4 via ztunnel
+
+### Why Nixidy?
+
+Nixidy combines Nix's type safety with Kubernetes flexibility:
+
+- **Type checking**: Catch errors before applying to cluster
+- **Reusability**: Share modules across environments (local, staging, prod)
+- **Helm integration**: Use Helm charts with Nix's reproducibility
+- **Version pinning**: Exact chart versions in flake.lock
+
+### Why Custom OTel Collector?
+
+The platform builds a custom OpenTelemetry Collector via `flake.nix`:
+
+```nix
+otel-collector = otelPkgs.buildOtelCollector {
+  pname = "otel-collector";
+  version = "0.147.0";
+  config = {
+    receivers = [{ gomod = "go.opentelemetry.io/collector/receiver/otlpreceiver v0.147.0"; }];
+    processors = [{ gomod = "go.opentelemetry.io/collector/processor/batchprocessor v0.147.0"; }];
+    exporters = [
+      { gomod = "go.opentelemetry.io/collector/exporter/otlpexporter v0.147.0"; }
+      { gomod = "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter v0.147.0"; }
+    ];
+  };
+};
+```
+
+Benefits:
+
+- **Minimal size**: Only includes required components
+- **Reproducibility**: Exact dependencies pinned in flake.lock
+- **Security**: No unnecessary receivers or exporters
+- **Performance**: Optimized build with only needed processors
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Kubernetes Setup" icon="dharmachakra" href="/architecture/kubernetes">
+    Learn about the Kind cluster configuration and node topology
+  </Card>
+  <Card title="Networking" icon="network-wired" href="/architecture/networking">
+    Explore Cilium CNI and eBPF-based networking
+  </Card>
+  <Card title="Service Mesh" icon="diagram-project" href="/architecture/service-mesh">
+    Understand Istio ambient mode architecture
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/architecture/observability">
+    Dive into the metrics, logs, and traces stack
+  </Card>
+  <Card title="GitOps" icon="code-branch" href="/architecture/gitops">
+    Discover ArgoCD and Nixidy manifest generation
+  </Card>
+</CardGroup>

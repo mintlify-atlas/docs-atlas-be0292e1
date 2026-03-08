@@ -1,0 +1,231 @@
+---
+title: "Cilium Mode"
+description: "Bootstrap with Cilium CNI and Hubble for network testing"
+---
+
+## Overview
+
+Cilium mode (`bootstrap-full.sh`) provides a lightweight cluster with Cilium CNI and Hubble observability, without the full Istio + ArgoCD stack. It's designed for CNI testing and network policy validation.
+
+<Info>
+**Cold start:** ~200s | **Warm start:** Not supported
+</Info>
+
+## Key Features
+
+- **Cilium + Hubble** - Full CNI with network observability
+- **1 worker node** - Control-plane + 1 worker
+- **No warm cluster** - Always performs full bootstrap
+- **No Istio** - CNI testing without service mesh
+- **No ArgoCD** - Manual deployment only
+
+## Command Usage
+
+```bash
+# Direct invocation
+bootstrap-full
+
+# Or via bootstrap --full
+bootstrap --full
+```
+
+<Note>
+The `bootstrap --full` flag delegates to `bootstrap-full.sh` automatically.
+</Note>
+
+## Architecture
+
+Cilium mode uses `kind-config-lite.yaml` with:
+
+- **1 control-plane node**
+- **1 worker node** (reduced from full-bootstrap's 2 workers)
+- **Cilium CNI** with `disableDefaultCNI: true`
+
+<AccordionGroup>
+  <Accordion title="kind-config-lite.yaml">
+    ```yaml
+    kind: Cluster
+    apiVersion: kind.x-k8s.io/v1alpha4
+    name: microservice-infra
+    networking:
+      disableDefaultCNI: true  # Cilium will be installed
+    nodes:
+      - role: control-plane
+        extraPortMappings:
+          - containerPort: 30300  # Grafana
+            hostPort: 30300
+          - containerPort: 30081  # Traefik
+            hostPort: 30081
+          - containerPort: 31235  # Hubble UI
+            hostPort: 31235
+          - containerPort: 30090  # Prometheus
+            hostPort: 30090
+          - containerPort: 30093  # Alertmanager
+            hostPort: 30093
+      - role: worker
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## 4-Phase Execution
+
+### Phase 1: Preparation (Parallel)
+
+```bash
+timed_step "phase1-prep" parallel_run \
+  "kind-cluster:_step_kind_cluster" \
+  "gen-manifests:bash ${SCRIPT_DIR}/gen-manifests.sh" \
+  "otel-build:bash ${SCRIPT_DIR}/load-otel-collector-image.sh build" \
+  "image-preload:_step_image_preload"
+```
+
+- Create kind cluster
+- Generate manifests
+- Build OTel collector image (not cached)
+- Pull container images
+
+### Phase 2: Network Setup (Sequential)
+
+```bash
+timed_step "phase2-network" _step_network_setup
+```
+
+<Steps>
+  <Step title="Load Cilium image">
+    Load `quay.io/cilium/cilium:v${CILIUM_VERSION}` into kind
+  </Step>
+  <Step title="Load OTel image">
+    Load custom OTel collector image
+  </Step>
+  <Step title="Background image load">
+    Start loading remaining images in background
+  </Step>
+  <Step title="Install Cilium">
+    Run `cilium-install.sh` (overlaps with image loading)
+  </Step>
+  <Step title="Wait for images">
+    Ensure all images loaded before Phase 3
+  </Step>
+  <Step title="PostgreSQL early start">
+    Start PostgreSQL to overlap its startup time
+  </Step>
+</Steps>
+
+### Phase 3: Deploy Services (Parallel)
+
+```bash
+timed_step "phase3-deploy" parallel_run \
+  "garage:_step_garage_deploy" \
+  "observability:_step_observability" \
+  "traefik:_step_traefik" \
+  "cloudflared:_step_cloudflared"
+```
+
+- **garage** - S3-compatible storage
+- **observability** - Prometheus, Grafana, Loki, Tempo, OTel
+- **traefik** - Ingress controller with auth patch
+- **cloudflared** - Cloudflare tunnel (optional)
+
+### Phase 4: Wait for Pods
+
+Wait for critical pods in parallel:
+- PostgreSQL
+- Grafana
+- Prometheus
+
+## Network Features
+
+### Cilium CNI
+
+Cilium provides:
+- eBPF-based networking
+- Network policies
+- Load balancing
+- Service mesh capabilities (not used in this mode)
+
+### Hubble Observability
+
+Hubble UI available at `http://localhost:31235` provides:
+- Network flow visualization
+- Service dependency mapping
+- Network policy validation
+- Traffic metrics
+
+## Exposed Services
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Grafana | http://localhost:30300 | admin/admin |
+| Prometheus | http://localhost:30090 | - |
+| Alertmanager | http://localhost:30093 | - |
+| Hubble UI | http://localhost:31235 | - |
+| Traefik | http://localhost:30081 | - |
+
+## Differences from Dev-Fast
+
+<CardGroup cols={2}>
+  <Card title="CNI" icon="network-wired">
+    **Cilium + Hubble** vs kindnetd
+  </Card>
+  <Card title="Nodes" icon="server">
+    **1 worker** vs single control-plane
+  </Card>
+  <Card title="Warm Cluster" icon="fire">
+    **Not supported** vs hash-based caching
+  </Card>
+  <Card title="Speed" icon="gauge">
+    **~200s** vs ~120s
+  </Card>
+</CardGroup>
+
+## Differences from Full-Bootstrap
+
+<CardGroup cols={2}>
+  <Card title="Istio" icon="mesh">
+    **No Istio** vs ambient mode
+  </Card>
+  <Card title="ArgoCD" icon="sync">
+    **No ArgoCD** vs automated GitOps
+  </Card>
+  <Card title="Workers" icon="server">
+    **1 worker** vs 2 workers
+  </Card>
+  <Card title="Speed" icon="gauge">
+    **~200s** vs ~250s
+  </Card>
+</CardGroup>
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="CNI Testing" icon="network-wired">
+    Validate Cilium network policies and features
+  </Card>
+  <Card title="Network Debugging" icon="bug">
+    Use Hubble to visualize traffic flows
+  </Card>
+  <Card title="Middle Ground" icon="balance-scale">
+    More realistic than dev-fast, faster than full
+  </Card>
+  <Card title="Policy Validation" icon="shield">
+    Test network security policies
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+After bootstrap:
+
+```bash
+cd microservice-app && tilt up
+```
+
+Access Hubble UI to monitor network traffic:
+
+```bash
+open http://localhost:31235
+```
+
+## Comparison
+
+See the [Bootstrap Mode Comparison](/bootstrap/comparison) to choose the right mode for your needs.

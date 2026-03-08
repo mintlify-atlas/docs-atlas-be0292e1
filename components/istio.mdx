@@ -1,0 +1,134 @@
+---
+title: Istio Service Mesh
+description: Ambient mode service mesh with OpenTelemetry tracing
+---
+
+## Overview
+
+Istio provides a service mesh layer using the modern **ambient mode** architecture. This eliminates the need for sidecar proxies while still providing traffic management, security, and observability.
+
+## Installation
+
+Istio is installed via `istio-install.sh` using `istioctl`:
+
+```bash
+istioctl install --set profile=ambient --skip-confirmation
+```
+
+## Architecture: Ambient Mode
+
+Ambient mode uses a sidecar-less architecture with:
+
+- **ztunnel** - Zero trust tunnel for L4 security
+- **waypoint proxy** - Optional L7 processing per namespace
+- No modifications to application pods
+
+### Benefits
+
+- Lower resource overhead (no sidecars)
+- Simplified operations
+- Faster pod startup times
+- Incremental L7 feature adoption
+
+## Configuration
+
+### OpenTelemetry Tracing
+
+Istio is configured to send traces to the OTel Collector:
+
+```bash
+--set meshConfig.enableTracing=true
+--set "meshConfig.extensionProviders[0].name=otel-tracing"
+--set "meshConfig.extensionProviders[0].opentelemetry.service=otel-collector.observability.svc.cluster.local"
+--set "meshConfig.extensionProviders[0].opentelemetry.port=4317"
+```
+
+**Tracing Flow**: Istio → OTel Collector (gRPC:4317) → Tempo
+
+### Gateway API
+
+The installation includes Kubernetes Gateway API CRDs:
+
+```bash
+kubectl apply --server-side=true -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.0/standard-install.yaml
+```
+
+This enables modern Gateway resources for traffic management.
+
+## Namespace Configuration
+
+The `microservices` namespace is configured for ambient mode:
+
+```bash
+kubectl label namespace microservices istio.io/dataplane-mode=ambient --overwrite
+```
+
+### Waypoint Proxy
+
+A waypoint proxy is deployed for L7 processing:
+
+```bash
+istioctl waypoint apply -n microservices --enroll-namespace --wait
+```
+
+The waypoint proxy provides:
+- L7 traffic routing
+- Request-level metrics
+- Advanced traffic policies
+- Protocol-aware load balancing
+
+## Custom Resources
+
+Istio CRs are stored in the `istio/` directory and applied during setup:
+
+```bash
+kubectl apply -f "$REPO_ROOT/istio/"
+```
+
+These include:
+- Virtual Services
+- Destination Rules
+- Authorization Policies
+- Request Authentication
+
+## Integration Points
+
+### Cilium CNI
+
+Istio's CNI plugin chains with Cilium:
+- Cilium handles L3/L4 networking
+- Istio handles L7 policies and observability
+- Both coexist without conflicts
+
+### OpenTelemetry Collector
+
+Traces flow through this pipeline:
+
+```
+Application → Istio mesh → OTel Collector → Tempo
+```
+
+The OTel Collector is at `otel-collector.observability.svc.cluster.local:4317`.
+
+### Traefik Ingress
+
+Traefik routes external traffic to services within the Istio mesh. The mesh handles internal service-to-service communication.
+
+## Observability
+
+Istio automatically generates metrics for:
+- Request rates (RPS)
+- Latency percentiles (p50, p95, p99)
+- Error rates
+- Traffic distribution
+
+These metrics are scraped by Prometheus via ServiceMonitors.
+
+## Security Features
+
+- **mTLS** - Automatic mutual TLS between services
+- **Authorization policies** - Fine-grained access control
+- **Request authentication** - JWT validation
+- **Zero trust** - Default deny with explicit allows
+
+Ambient mode provides L4 security by default, with optional L7 security via waypoint proxies.

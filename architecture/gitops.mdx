@@ -1,0 +1,695 @@
+---
+title: GitOps Architecture
+description: ArgoCD, ApplicationSet, and Nixidy for declarative infrastructure management
+---
+
+The platform implements GitOps principles using ArgoCD for continuous deployment and Nixidy for type-safe manifest generation. All infrastructure is defined as code in Git with automatic synchronization to the cluster.
+
+## GitOps Principles
+
+The platform follows GitOps best practices:
+
+1. **Git as Single Source of Truth**: All configuration in version control
+2. **Declarative Configuration**: Desired state, not imperative commands
+3. **Automated Synchronization**: Continuous reconciliation from Git to cluster
+4. **Observability**: Audit trail and drift detection built-in
+
+## ArgoCD
+
+ArgoCD is the GitOps operator that continuously syncs Git state to Kubernetes.
+
+### Installation
+
+ArgoCD is bootstrapped via the `argocd-bootstrap.sh` script:
+
+```bash
+# scripts/argocd-bootstrap.sh
+
+# Build nixidy manifests
+nix build "${REPO_ROOT}#legacyPackages.${PLATFORM_NIX_SYSTEM}.nixidyEnvs.local.environmentPackage" \
+  -o "${REPO_ROOT}/manifests-result"
+
+# Create ArgoCD namespace
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+# Apply ArgoCD manifests with server-side apply
+kubectl apply -f "${REPO_ROOT}/manifests-result/argocd/" --server-side --force-conflicts
+
+# Wait for ArgoCD to be ready
+kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=300s
+```
+
+### Architecture
+
+ArgoCD consists of several components:
+
+**Application Controller**:
+- Monitors Git repositories for changes
+- Compares desired state (Git) with live state (cluster)
+- Triggers sync operations when drift detected
+- Handles health assessment and status reporting
+
+**Repo Server**:
+- Clones Git repositories
+- Renders manifests (Helm, Kustomize, plain YAML)
+- Caches rendered manifests for performance
+- Runs Nixidy transformations (in this platform)
+
+**Server**:
+- Provides Web UI and gRPC API
+- User authentication and authorization
+- Project and application management
+- Exposed via NodePort on port 30080 (HTTP) and 30443 (HTTPS)
+
+**Notifications Controller**:
+- Sends alerts on sync events (success, failure, degraded)
+- Integrates with Slack, GitHub, email, etc.
+- Configurable triggers and templates
+
+**ApplicationSet Controller**:
+- Generates Applications from templates
+- Discovers targets from Git, clusters, labels, etc.
+- Enables managing hundreds of apps with one resource
+
+### Access
+
+Access ArgoCD UI at `http://localhost:30080` when running Full bootstrap mode.
+
+**Initial credentials:**
+```bash
+# Username: admin
+# Password:
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d
+```
+
+## ApplicationSet Pattern
+
+The platform uses ApplicationSet to manage multiple microservices from a single definition.
+
+### Services ApplicationSet
+
+```yaml
+# argocd/services-appset.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: services
+  namespace: argocd
+spec:
+  generators:
+    - git:
+        repoURL: https://github.com/thirdlf03/microservice-app.git
+        directories:
+          - path: services/*/k8s/generated
+          - path: frontend/k8s/generated
+  template:
+    metadata:
+      name: '{{path[0]}}-{{path[1]}}'
+      annotations:
+        argocd.argoproj.io/manifest-generate-paths: '{{path}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/thirdlf03/microservice-app.git
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        server: https://kubernetes.default.svc
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+```
+
+### How It Works
+
+**Git Generator**:
+- Scans the `microservice-app` repository
+- Finds directories matching `services/*/k8s/generated`
+- Creates one Application per discovered directory
+- Examples: `services/user-service/k8s/generated`, `services/auth-service/k8s/generated`
+
+**Template Expansion**:
+- `{{path[0]}}` → First path segment (e.g., `services`, `frontend`)
+- `{{path[1]}}` → Second path segment (e.g., `user-service`, `auth-service`)
+- Application name: `services-user-service`, `frontend`
+
+**Automated Sync**:
+- `automated.prune: true` → Delete resources removed from Git
+- `automated.selfHeal: true` → Revert manual changes to Git state
+
+### Benefits
+
+- **Scalability**: One ApplicationSet → N Applications
+- **Consistency**: All services use same sync policy
+- **Discoverability**: New services automatically deployed when added to Git
+- **Maintainability**: Update sync policy in one place
+
+## Nixidy Manifest Generation
+
+Nixidy is a Nix-based tool for generating Kubernetes manifests with type safety and reusability.
+
+### Why Nixidy?
+
+**Traditional approaches:**
+- **Plain YAML**: No validation, copy-paste duplication
+- **Helm**: Templating language, hard to test, version conflicts
+- **Kustomize**: Limited logic, awkward composition
+
+**Nixidy advantages:**
+- **Type checking**: Catch errors before applying to cluster
+- **Reusability**: Share modules across environments (local, staging, prod)
+- **Helm integration**: Use Helm charts with Nix's reproducibility
+- **Version pinning**: Exact chart versions in flake.lock
+- **Testing**: Evaluate manifests without cluster access
+
+### Architecture
+
+```
+Nixidy Modules (*.nix)
+  ↓
+Nix Evaluation
+  ↓
+Helm Chart Resolution (nixhelm)
+  ↓
+Manifest Generation
+  ↓
+manifests/ (committed to Git)
+  ↓
+manifests-result/ (symlink to Nix store)
+  ↓
+kubectl apply OR ArgoCD sync
+```
+
+### Environment Structure
+
+```nix
+# nixidy/env/local.nix
+{ ... }:
+{
+  imports = [
+    ./local/argocd.nix
+    ./local/garage.nix
+    ./local/kube-prometheus-stack.nix
+    ./local/loki.nix
+    ./local/tempo.nix
+    ./local/otel-collector.nix
+    ./local/sample-app.nix
+    ./local/traefik.nix
+    ./local/grafana-dashboards.nix
+    ./local/image-updater.nix
+    ./local/cloudflared.nix
+    ./local/postgresql.nix
+  ];
+
+  nixidy = {
+    target = {
+      repository = "https://github.com/thirdlf03/microservice-infra";
+      branch = "main";
+      rootPath = "./manifests";
+    };
+
+    defaults = {
+      destination.server = "https://kubernetes.default.svc";
+      syncPolicy = {
+        autoSync = {
+          enable = true;
+          prune = true;
+          selfHeal = true;
+        };
+      };
+    };
+
+    appOfApps = {
+      name = "apps";
+      namespace = "argocd";
+    };
+  };
+}
+```
+
+### Module Examples
+
+#### Helm Chart Module
+
+```nix
+# nixidy/env/local/kube-prometheus-stack.nix
+{ charts, ... }:
+{
+  applications.kube-prometheus-stack = {
+    namespace = "observability";
+    createNamespace = true;
+    syncPolicy.syncOptions.serverSideApply = true;
+
+    helm.releases.kube-prometheus-stack = {
+      chart = charts.prometheus-community.kube-prometheus-stack;
+      values = {
+        grafana = {
+          enabled = true;
+          adminPassword = "admin";
+          service = {
+            type = "NodePort";
+            nodePort = 30300;
+          };
+          additionalDataSources = [
+            {
+              name = "Loki";
+              type = "loki";
+              url = "http://loki.observability:3100";
+            }
+          ];
+        };
+      };
+    };
+  };
+}
+```
+
+**Features:**
+- `chart = charts.prometheus-community.kube-prometheus-stack` → Resolves from nixhelm
+- `values = { ... }` → Type-checked Helm values
+- `createNamespace = true` → Generates Namespace manifest
+- `syncPolicy.syncOptions.serverSideApply = true` → Uses server-side apply
+
+#### Raw Manifest Module
+
+```nix
+# nixidy/env/local/otel-collector.nix
+_:
+let
+  labels = {
+    "app.kubernetes.io/name" = "otel-collector";
+  };
+
+  collectorConfig = ''
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+    # ... rest of config
+  '';
+in
+{
+  applications.otel-collector = {
+    namespace = "observability";
+    createNamespace = false;
+
+    resources = {
+      configMaps.otel-collector-config = {
+        data."config.yaml" = collectorConfig;
+      };
+
+      deployments.otel-collector.spec = {
+        replicas = 1;
+        selector.matchLabels = labels;
+        template = {
+          metadata.labels = labels;
+          spec = {
+            containers.otel-collector = {
+              image = "otel-collector:latest";
+              imagePullPolicy = "Never";
+              args = ["--config=/etc/otelcol/config.yaml"];
+              # ... rest of spec
+            };
+          };
+        };
+      };
+
+      services.otel-collector.spec = {
+        selector = labels;
+        ports = {
+          grpc = {
+            port = 4317;
+            targetPort = 4317;
+          };
+        };
+      };
+    };
+  };
+}
+```
+
+**Features:**
+- `resources.configMaps` → Generates ConfigMap manifest
+- `resources.deployments` → Generates Deployment manifest
+- `resources.services` → Generates Service manifest
+- Nix variables (`labels`, `collectorConfig`) for reusability
+
+### Building Manifests
+
+Manifests are generated via Nix build:
+
+```bash
+# Manual build
+gen-manifests
+
+# What it does:
+nix build ".#legacyPackages.${PLATFORM_NIX_SYSTEM}.nixidyEnvs.local.environmentPackage" \
+  -o "${REPO_ROOT}/manifests-result"
+```
+
+**Output structure:**
+```
+manifests-result/
+├── argocd/
+│   ├── Namespace-argocd.yaml
+│   ├── Deployment-argocd-server.yaml
+│   └── ...
+├── kube-prometheus-stack/
+│   ├── Namespace-observability.yaml
+│   ├── CustomResourceDefinition-prometheuses-monitoring-coreos-com.yaml
+│   └── ...
+└── apps/
+    ├── Application-kube-prometheus-stack.yaml
+    ├── Application-loki.yaml
+    └── ...
+```
+
+### Chart Version Pinning
+
+Helm chart versions are pinned in `flake.lock`:
+
+```json
+{
+  "nixhelm": {
+    "inputs": {
+      "nixpkgs": ["nixpkgs"]
+    },
+    "locked": {
+      "lastModified": 1234567890,
+      "narHash": "sha256-...",
+      "owner": "farcaller",
+      "repo": "nixhelm",
+      "rev": "abc123...",
+      "type": "github"
+    }
+  }
+}
+```
+
+**Benefits:**
+- Reproducible builds (same input → same output)
+- No surprise upgrades
+- Explicit version bumps via `nix flake update`
+- Binary cache for faster builds
+
+### Watch Mode
+
+For development, watch mode auto-regenerates and applies manifests:
+
+```bash
+watch-manifests
+
+# What it does:
+watchexec --exts nix --restart -- bash -lc '
+  bash scripts/gen-manifests.sh && 
+  kubectl apply -f manifests/
+'
+```
+
+**Workflow:**
+1. Edit `.nix` file in `nixidy/env/local/`
+2. Watchexec detects change
+3. Regenerates manifests
+4. Applies to cluster
+5. See changes in seconds
+
+## Deployment Workflow
+
+### Local Development (Bootstrap)
+
+```
+1. Developer edits nixidy modules
+2. Run `bootstrap` (dev-fast) or `full-bootstrap` (with ArgoCD)
+3. Scripts call gen-manifests to build
+4. kubectl apply -f manifests-result/
+5. Changes visible in cluster immediately
+```
+
+### Production (ArgoCD)
+
+```
+1. Developer edits nixidy modules
+2. Commit and push to Git
+3. ArgoCD detects Git change (polling or webhook)
+4. ArgoCD syncs Application
+5. Changes applied to cluster
+6. Status reported in ArgoCD UI
+```
+
+### Multi-Environment
+
+Nixidy supports multiple environments:
+
+```nix
+# flake.nix
+legacyPackages.nixidyEnvs = {
+  local = inputs.nixidy.lib.mkEnv {
+    inherit pkgs;
+    charts = inputs.nixhelm.chartsDerivations.${system};
+    modules = [ ./nixidy/env/local.nix ];
+  };
+  prod = inputs.nixidy.lib.mkEnv {
+    inherit pkgs;
+    charts = inputs.nixhelm.chartsDerivations.${system};
+    modules = [ ./nixidy/env/prod.nix ];
+  };
+};
+```
+
+**Build for production:**
+```bash
+nix build ".#legacyPackages.${PLATFORM_NIX_SYSTEM}.nixidyEnvs.prod.environmentPackage" \
+  -o manifests-result-prod
+```
+
+**Environment differences:**
+- Local: NodePort services, small resource limits, debug logging
+- Prod: LoadBalancer services, production resource requests/limits, info logging
+
+## App-of-Apps Pattern
+
+Nixidy generates an "app-of-apps" Application that manages all other Applications:
+
+```yaml
+# Generated by nixidy
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: apps
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/thirdlf03/microservice-infra
+    targetRevision: main
+    path: manifests/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+**Benefits:**
+- Single entry point for all infrastructure
+- Bootstrap by applying one Application
+- Hierarchical dependency management
+- Centralized sync policies
+
+## Secrets Management
+
+Sensitive data is encrypted with SOPS (Secrets OPerationS):
+
+```yaml
+# .sops.yaml
+creation_rules:
+  - path_regex: secrets/.*\.yaml$
+    age: age1234567890abcdef...
+```
+
+### Workflow
+
+**Initialize age key:**
+```bash
+sops-init  # Generates ~/.config/sops/age/keys.txt
+```
+
+**Encrypt a secret:**
+```bash
+sops secrets/postgres-password.yaml
+# Opens editor, encrypts on save
+```
+
+**Decrypt in pipeline:**
+```bash
+sops -d secrets/postgres-password.yaml | kubectl apply -f -
+```
+
+**ArgoCD integration:**
+- Use argocd-vault-plugin or sealed-secrets
+- Decrypt at sync time
+- Never commit plaintext to Git
+
+## Drift Detection
+
+ArgoCD continuously compares Git state to live cluster state.
+
+### Out of Sync Scenarios
+
+**Manual kubectl edit:**
+- User edits Deployment in cluster
+- ArgoCD marks Application as "OutOfSync"
+- If `selfHeal: true`, ArgoCD reverts to Git state
+
+**Failed sync:**
+- Manifest has validation error
+- Application stuck in "Progressing" state
+- Check sync status and logs in UI
+
+**Pruning:**
+- Resource deleted from Git
+- If `prune: true`, ArgoCD deletes from cluster
+- If `prune: false`, resource remains (orphaned)
+
+### Sync Options
+
+```yaml
+syncPolicy:
+  syncOptions:
+    - CreateNamespace=true      # Auto-create destination namespace
+    - PruneLast=true            # Delete resources after deploying new ones
+    - ServerSideApply=true      # Use SSA instead of client-side apply
+    - RespectIgnoreDifferences=true  # Honor ignoreDifferences config
+```
+
+## Troubleshooting
+
+### Nixidy Build Errors
+
+```bash
+# Quick validation
+nix-check
+
+# Full build with verbose output
+nix build ".#legacyPackages.$(nix eval --raw --impure --expr 'builtins.currentSystem').nixidyEnvs.local.environmentPackage" --print-build-logs
+
+# Check specific module
+nix eval ".#legacyPackages.$(nix eval --raw --impure --expr 'builtins.currentSystem').nixidyEnvs.local.applications.loki" --json | jq
+```
+
+### ArgoCD Sync Failures
+
+```bash
+# Check Application status
+kubectl get application -n argocd
+
+# View sync logs
+argocd app logs <app-name> --follow
+
+# Manual sync with prune and replace
+argocd app sync <app-name> --prune --replace
+
+# Diff Git vs. live state
+argocd app diff <app-name>
+```
+
+### Helm Chart Issues
+
+```bash
+# Fix chart hash mismatches
+fix-chart-hash
+
+# Manually update flake inputs
+nix flake update nixhelm
+
+# Check available charts
+nix eval ".#legacyPackages.$(nix eval --raw --impure --expr 'builtins.currentSystem').charts.prometheus-community" --json | jq 'keys'
+```
+
+### ApplicationSet Not Generating Apps
+
+```bash
+# Check ApplicationSet status
+kubectl describe applicationset services -n argocd
+
+# View generator output
+argocd appset get services -o yaml
+
+# Check ApplicationSet controller logs
+kubectl logs -n argocd deploy/argocd-applicationset-controller -f
+```
+
+## Best Practices
+
+### Repository Structure
+
+**Separate infrastructure and application repos:**
+- `microservice-infra`: Nixidy modules, platform services
+- `microservice-app`: Application code and manifests
+
+**Benefits:**
+- Different access controls
+- Independent CI/CD pipelines
+- Clear separation of concerns
+
+### Environment Promotion
+
+**Use separate Git branches or directories:**
+```
+environments/
+├── dev/
+├── staging/
+└── production/
+```
+
+**Or separate repos:**
+- `infra-dev`, `infra-staging`, `infra-prod`
+
+**Promotion workflow:**
+1. Test changes in dev environment
+2. Merge to staging branch
+3. Automated or manual promotion to production
+4. Rollback = revert Git commit
+
+### Resource Organization
+
+**Group by application, not by resource type:**
+
+**Good:**
+```
+applications/
+├── prometheus/
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── configmap.yaml
+└── grafana/
+    ├── deployment.yaml
+    └── service.yaml
+```
+
+**Bad:**
+```
+resources/
+├── deployments/
+│   ├── prometheus.yaml
+│   └── grafana.yaml
+└── services/
+    ├── prometheus.yaml
+    └── grafana.yaml
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Kubernetes Setup" icon="dharmachakra" href="/architecture/kubernetes">
+    Understand the underlying cluster configuration
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/architecture/observability">
+    See how GitOps manages the observability stack
+  </Card>
+</CardGroup>

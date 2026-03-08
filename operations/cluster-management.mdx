@@ -1,0 +1,184 @@
+---
+title: Cluster Management
+description: Manage Kind cluster lifecycle with warm state preservation
+---
+
+## Overview
+
+The microservice-infra project provides commands for managing the Kind cluster lifecycle, including creation, deletion, and state-preserving stop/start operations.
+
+All cluster management operations target the cluster named `microservice-infra`.
+
+## Cluster Operations
+
+### Create Cluster
+
+Create a new Kind cluster:
+
+```bash
+cluster-up
+```
+
+**Implementation details** (scripts/cluster-up.sh:9-21):
+- Checks if cluster already exists before creating
+- Uses configuration from `k8s/kind-config.yaml`
+- Automatically sets kubectl context to `kind-microservice-infra`
+- Idempotent: safe to run multiple times
+
+### Delete Cluster
+
+Permanently delete the cluster and all resources:
+
+```bash
+cluster-down
+```
+
+**Implementation** (scripts/cluster-down.sh:11-12):
+- Removes all cluster containers
+- Deletes all associated volumes and data
+- Does not preserve any state
+
+### Stop Cluster (Preserve State)
+
+Stop the cluster containers without deleting data:
+
+```bash
+cluster-stop
+```
+
+**How it works** (scripts/cluster-stop.sh:7-16):
+- Finds all Docker containers with label `io.x-k8s.kind.cluster=microservice-infra`
+- Stops containers using `docker stop`
+- Preserves all volumes, state, and configuration
+- Enables fast restart without re-bootstrapping
+
+### Start Cluster (Resume)
+
+Restart a previously stopped cluster:
+
+```bash
+cluster-start
+```
+
+**Implementation** (scripts/cluster-start.sh:7-31):
+- Finds stopped containers for the cluster
+- Starts containers with `docker start`
+- Waits for Kubernetes API server to become ready
+- Automatically switches kubectl context
+- Displays node status on successful start
+
+## Warm Cluster Management
+
+The bootstrap scripts support "warm cluster" operations that preserve state across runs:
+
+### Hash-based State Tracking
+
+The bootstrap system tracks two hashes in `.bootstrap-state/`:
+
+1. **Cluster hash** - Kind config + image definitions
+2. **Manifest hash** - All generated Kubernetes manifests
+
+### Bootstrap Modes
+
+When running `bootstrap` (scripts/bootstrap.sh:277-300):
+
+**Cold start**: Run if cluster doesn't exist or config changed
+- Full cluster creation
+- Image pre-loading and loading
+- Complete service deployment
+- ~120 seconds
+
+**Warm reapply**: Run if manifests changed but cluster config unchanged
+- Regenerate manifests
+- Reapply changed resources
+- Skip cluster recreation and image loading
+- ~30 seconds
+
+**Warm verify**: Run if both hashes match
+- Quick health check
+- Display pod status
+- ~1 second
+
+### Force Full Rebuild
+
+Ignore hashes and force complete rebuild:
+
+```bash
+bootstrap --clean
+```
+
+This:
+- Deletes the existing cluster
+- Removes `.bootstrap-state/` hashes
+- Performs a cold start
+
+## Cluster Configurations
+
+Three Kind configurations are available in `k8s/`:
+
+| Config | Used By | Features |
+|--------|---------|----------|
+| `kind-config-dev.yaml` | `bootstrap` | kindnetd CNI, single node, NodePort 30000-32000 |
+| `kind-config-lite.yaml` | `bootstrap-full` | Cilium CNI, 1 worker, Hubble UI port 31235 |
+| `kind-config.yaml` | `full-bootstrap` | Cilium CNI, 2 workers, ArgoCD ports 30080/30443 |
+
+## Common Workflows
+
+### Daily Development
+
+```bash
+# Morning: resume work
+cluster-start
+
+# Evening: save resources
+cluster-stop
+```
+
+### Clean Slate Testing
+
+```bash
+cluster-down
+bootstrap --clean
+```
+
+### Configuration Changes
+
+```bash
+# After modifying kind-config-dev.yaml
+bootstrap
+# Automatically detects config change and rebuilds
+```
+
+### Manifest-Only Updates
+
+```bash
+# After modifying nixidy modules
+bootstrap
+# Detects manifest changes, skips cluster recreation
+```
+
+## Troubleshooting
+
+### Cluster Won't Start
+
+Check Docker containers:
+
+```bash
+docker ps -a --filter "label=io.x-k8s.kind.cluster=microservice-infra"
+```
+
+### Force Clean State
+
+```bash
+cluster-down
+rm -rf .bootstrap-state/
+bootstrap --clean
+```
+
+### Context Not Switching
+
+Manually set context:
+
+```bash
+kubectl config use-context kind-microservice-infra
+```

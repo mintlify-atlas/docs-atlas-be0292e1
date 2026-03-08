@@ -1,0 +1,316 @@
+---
+title: Tempo
+description: Distributed tracing backend with S3 storage and metrics generation
+---
+
+## Overview
+
+Tempo stores and queries distributed traces from applications and infrastructure components. It uses Garage S3 for trace storage and generates RED metrics (Rate, Errors, Duration) that are written to Prometheus.
+
+## Configuration
+
+### Nixidy Module (`nixidy/env/local/tempo.nix`)
+
+```nix
+applications.tempo = {
+  namespace = "observability";
+  createNamespace = false;  # kube-prometheus-stack creates it
+  
+  helm.releases.tempo = {
+    chart = charts.grafana.tempo;
+    values = {
+      tempo = {
+        extraEnvFrom = [
+          { secretRef.name = "garage-s3-credentials"; }
+        ];
+        storage = {
+          trace = {
+            backend = "s3";
+            s3 = {
+              endpoint = "garage.storage:3900";
+              bucket = "tempo-traces";
+              region = "garage";
+              insecure = true;
+              forcepathstyle = true;
+            };
+            wal.path = "/var/tempo/wal";
+          };
+        };
+        receivers.otlp.protocols = {
+          grpc.endpoint = "0.0.0.0:4317";
+          http.endpoint = "0.0.0.0:4318";
+        };
+        metricsGenerator = {
+          enabled = true;
+          remoteWriteUrl = "http://kube-prometheus-stack-prometheus.observability:9090/api/v1/write";
+        };
+      };
+      persistence = {
+        enabled = true;
+        size = "5Gi";
+      };
+    };
+  };
+};
+```
+
+## Architecture
+
+### Storage Backend
+
+Tempo uses **Garage S3** for trace storage:
+
+- **Endpoint**: `garage.storage:3900`
+- **Bucket**: `tempo-traces`
+- **Region**: `garage`
+- **Path style**: Forced (required for Garage)
+
+**Credentials**: Injected via `garage-s3-credentials` secret
+
+### Write-Ahead Log (WAL)
+
+```yaml
+wal:
+  path: /var/tempo/wal
+```
+
+Traces are written to local WAL before S3 upload:
+1. Receive trace spans
+2. Write to WAL on PV
+3. Batch into blocks
+4. Upload to S3
+5. WAL compaction
+
+### Persistence
+
+```yaml
+persistence:
+  enabled: true
+  size: 5Gi
+```
+
+Local PV stores:
+- Write-Ahead Log
+- Temporary trace blocks
+- Compaction cache
+
+## Trace Ingestion
+
+### OTLP Receivers
+
+Tempo accepts traces via OpenTelemetry Protocol:
+
+| Protocol | Port | Endpoint |
+|---|---|---|
+| OTLP gRPC | 4317 | `0.0.0.0:4317` |
+| OTLP HTTP | 4318 | `0.0.0.0:4318` |
+
+### Legacy Receivers
+
+Tempo also supports legacy tracing protocols:
+
+| Protocol | Port | Purpose |
+|---|---|---|
+| Jaeger gRPC | 14250 | Jaeger native format |
+| Jaeger Thrift HTTP | 14268 | Jaeger over HTTP |
+| Jaeger Thrift Compact | 6831 (UDP) | Jaeger UDP |
+| Jaeger Thrift Binary | 6832 (UDP) | Jaeger UDP |
+| Zipkin | 9411 | Zipkin format |
+
+### Service Endpoint
+
+- **Internal URL**: `http://tempo.observability:3200`
+- **Namespace**: `observability`
+- **Port**: 3200 (HTTP API and metrics)
+
+## Metrics Generator
+
+Tempo generates span metrics and writes them to Prometheus:
+
+```yaml
+metricsGenerator:
+  enabled: true
+  remoteWriteUrl: http://kube-prometheus-stack-prometheus.observability:9090/api/v1/write
+```
+
+### Generated Metrics
+
+**Span Metrics** (RED metrics):
+
+```promql
+# Request rate
+rate(traces_spanmetrics_calls_total[5m])
+
+# Error rate
+rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m])
+
+# Duration histogram
+traces_spanmetrics_latency_bucket
+```
+
+### Benefits
+
+- **No instrumentation overhead** - Metrics derived from existing traces
+- **Consistent cardinality** - Service/operation labels from spans
+- **Alerting** - Set alerts on trace-derived metrics
+- **Dashboards** - Visualize service performance without separate metrics
+
+## Trace Flow
+
+Traces flow through this pipeline:
+
+```
+Application → OTel Collector → Tempo → Garage S3
+                   ↓
+             Metrics Generator → Prometheus
+```
+
+### Example Trace Path
+
+1. **Application** emits OTLP traces
+2. **OTel Collector** (optional) processes/filters
+3. **Tempo** receives via gRPC:4317
+4. **WAL** writes to local disk
+5. **S3 backend** uploads blocks to Garage
+6. **Metrics generator** writes RED metrics to Prometheus
+
+## Integration
+
+### Grafana Data Source
+
+Tempo is configured as a Grafana data source with correlation:
+
+```yaml
+name: Tempo
+type: tempo
+url: http://tempo.observability:3200
+jsonData:
+  tracesToLogsV2:
+    datasourceUid: loki
+    filterByTraceID: true
+  tracesToMetrics:
+    datasourceUid: prometheus
+  serviceMap:
+    datasourceUid: prometheus
+  nodeGraph:
+    enabled: true
+  lokiSearch:
+    datasourceUid: loki
+```
+
+### Istio Tracing
+
+Istio sends traces to OTel Collector, which forwards to Tempo:
+
+```
+Istio mesh → otel-collector.observability:4317 → Tempo
+```
+
+Istio is configured with OpenTelemetry extension:
+
+```bash
+--set meshConfig.enableTracing=true
+--set meshConfig.extensionProviders[0].opentelemetry.service=otel-collector.observability.svc.cluster.local
+--set meshConfig.extensionProviders[0].opentelemetry.port=4317
+```
+
+### Traefik Tracing
+
+Traefik sends traces directly to OTel Collector:
+
+```yaml
+tracing:
+  otlp:
+    grpc:
+      endpoint: otel-collector.observability:4317
+```
+
+### Garage S3
+
+Tempo depends on Garage for trace block storage:
+
+1. **Setup**: Run `garage-setup.sh` to create bucket
+2. **Bucket**: `tempo-traces` in Garage
+3. **Secret**: `garage-s3-credentials` injected into Tempo pod
+
+## Query API
+
+Tempo exposes HTTP API at port 3200:
+
+### Search Traces
+
+```bash
+curl http://tempo.observability:3200/api/search?tags=service.name=greeter
+```
+
+### Get Trace by ID
+
+```bash
+curl http://tempo.observability:3200/api/traces/<trace-id>
+```
+
+### Metrics Query
+
+```bash
+curl http://tempo.observability:3200/api/metrics/summary
+```
+
+## Configuration Details
+
+### Compaction
+
+```yaml
+compactor:
+  compaction:
+    block_retention: 24h
+```
+
+Trace blocks are retained for 24 hours before deletion.
+
+### Multi-tenancy
+
+```yaml
+multitenancy_enabled: false
+```
+
+Disabled for local development (single-tenant mode).
+
+## Storage Credentials
+
+Tempo accesses Garage via S3 credentials:
+
+```bash
+kubectl get secret garage-s3-credentials -n observability -o yaml
+```
+
+**Fields**:
+- `AWS_ACCESS_KEY_ID`: Garage access key
+- `AWS_SECRET_ACCESS_KEY`: Garage secret key
+
+These are created by `garage-setup.sh`.
+
+## Observability Workflow
+
+### Debugging with Tempo
+
+1. **View metrics** in Grafana Prometheus dashboard
+2. **Identify slow service** from RED metrics
+3. **Click exemplar** (link from metric to trace)
+4. **Open trace** in Tempo UI
+5. **Analyze spans** to find bottleneck
+6. **View logs** for error context (click span → logs)
+
+### Service Map
+
+Grafana generates service dependency maps from Tempo traces:
+- Node graph showing service relationships
+- Request rate on edges
+- Error highlighting
+
+## Related Components
+
+- [Garage](/components/garage) - S3 backend for traces
+- [Prometheus](/components/prometheus) - Metrics generated from traces
+- [Grafana](/components/grafana) - Trace visualization
+- [Istio](/components/istio) - Trace generation from mesh
+- [Traefik](/components/traefik) - Ingress tracing

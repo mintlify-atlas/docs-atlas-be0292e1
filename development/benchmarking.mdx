@@ -1,0 +1,512 @@
+---
+title: Bootstrap Benchmarking
+description: Measuring and optimizing bootstrap performance across architectures
+---
+
+## Overview
+
+The bootstrap benchmark framework provides data-driven performance analysis of cluster setup scripts. It measures step-by-step execution times, collects resource usage statistics, and generates comprehensive reports across all CPU architectures.
+
+## Design Philosophy
+
+The benchmarking system follows a **measurement-first approach**:
+
+1. **Phase 1** (Current): Measure and collect data
+2. **Phase 2** (Future): Optimize based on measurements
+
+This document covers Phase 1 implementation. Optimizations like parallelization, caching, and resource tuning will be implemented in Phase 2 after identifying bottlenecks through data analysis.
+
+## Architecture
+
+The benchmark system consists of three core libraries:
+
+### 1. Platform Detection (`scripts/lib/platform.sh`)
+
+Provides unified platform detection across all architectures:
+
+**Exported Variables**:
+- `PLATFORM_OS` - Operating system (darwin/linux)
+- `PLATFORM_ARCH` - CPU architecture (aarch64/x86_64)
+- `PLATFORM_NIX_SYSTEM` - Nix system string (e.g., aarch64-darwin)
+- `PLATFORM_LINUX_SYSTEM` - Linux system string (for cross-compilation)
+- `PLATFORM_IS_WSL` - Boolean for WSL2 detection
+- `PLATFORM_DOCKER_ARCH` - Docker platform string (linux/arm64 or linux/amd64)
+
+**Helper Functions**:
+```bash
+platform_cpu_model()      # Returns CPU model string
+platform_cpu_cores()      # Returns core count
+platform_memory_gb()      # Returns total memory in GB
+platform_docker_version() # Returns Docker version
+platform_summary()        # Prints all platform info
+```
+
+**Supported Platforms**:
+
+| Environment | PLATFORM_OS | PLATFORM_ARCH | PLATFORM_NIX_SYSTEM | PLATFORM_IS_WSL |
+|-------------|-------------|---------------|---------------------|------------------|
+| Apple Silicon Mac | darwin | aarch64 | aarch64-darwin | false |
+| Intel Mac | darwin | x86_64 | x86_64-darwin | false |
+| Linux x86_64 | linux | x86_64 | x86_64-linux | false |
+| Linux aarch64 | linux | aarch64 | aarch64-linux | false |
+| WSL2 (x86_64) | linux | x86_64 | x86_64-linux | true |
+
+### 2. Timing Framework (`scripts/lib/timing.sh`)
+
+Tracks per-step execution times with millisecond precision:
+
+**API**:
+```bash
+source "${SCRIPT_DIR}/lib/timing.sh"
+
+timing_init "bootstrap"  # Initialize session
+timed_step "kind-cluster" bash "${SCRIPT_DIR}/cluster-up.sh"
+timed_step "cilium-install" bash "${SCRIPT_DIR}/cilium-install.sh"
+timing_report            # Print summary and save JSON
+```
+
+**Recorded Metrics**:
+- Step name
+- Duration (seconds with millisecond precision)
+- Exit code
+- Start/end timestamps (ISO 8601)
+- Resource usage (if monitor.sh is available)
+
+**Console Output**:
+```
+>>> [kind-cluster] starting...
+<<< [kind-cluster] OK — 45.234s
+>>> [cilium-install] starting...
+<<< [cilium-install] OK — 38.157s
+
+============================================================
+  Timing Report: bootstrap
+============================================================
+  Step                           Duration   Status
+  ------------------------------ ---------- ------
+  kind-cluster                     45.234s   OK
+  cilium-install                   38.157s   OK
+  gen-manifests                    22.401s   OK
+  ------------------------------ ---------- ------
+  TOTAL                           105.792s
+============================================================
+```
+
+### 3. Resource Monitoring (`scripts/lib/monitor.sh`)
+
+Collects system resource usage during step execution:
+
+**Monitored Metrics**:
+
+| Metric | macOS | Linux / WSL2 |
+|--------|-------|-------------|
+| CPU Usage | `top -l 1 -s 0` | `/proc/stat` |
+| Memory Usage | `vm_stat` | `/proc/meminfo` |
+| Docker Stats | `docker stats --no-stream` | Same |
+| Disk I/O | `iostat` (if available) | `/proc/diskstats` |
+
+**API**:
+```bash
+source "${SCRIPT_DIR}/lib/monitor.sh"
+
+start_monitor "step-name"  # Start background sampling (2s interval)
+# ... execute step ...
+stop_monitor "step-name"   # Stop and aggregate results
+```
+
+**Aggregated Values**:
+- CPU: Average and peak usage
+- Memory: Start, end, and peak values
+- Docker: Running container count
+
+## Benchmark Command
+
+### Usage
+
+```bash
+benchmark [MODE] [RUNS] [OPTIONS]
+
+# Examples
+benchmark                          # 3 runs of bootstrap.sh
+benchmark full-bootstrap 5         # 5 runs of full-bootstrap.sh
+benchmark bootstrap 3 --keep-logs  # Keep previous logs
+```
+
+**Arguments**:
+- `MODE` - Bootstrap mode: `bootstrap` or `full-bootstrap` (default: bootstrap)
+- `RUNS` - Number of benchmark runs (default: 3)
+
+**Options**:
+- `--keep-logs` - Keep previous benchmark logs instead of cleaning them
+- `--help` - Show help message
+
+### What It Measures
+
+The benchmark measures two bootstrap modes:
+
+#### Bootstrap Mode (Fast Development)
+- Kind cluster creation
+- Kindnetd CNI (faster than Cilium)
+- Single-node cluster
+- Warm Nix cache
+- Minimal observability stack
+
+#### Full Bootstrap Mode (Production Parity)
+- Kind cluster creation
+- Cilium CNI + Hubble
+- Multi-node cluster capability
+- Full observability stack (Prometheus, Grafana, Loki, Tempo)
+- ArgoCD bootstrap
+- All applications deployed
+
+### Workflow
+
+When you run `benchmark`, it:
+
+1. **Pre-flight Checks**
+   - Verifies docker, kind, kubectl are installed
+   - Checks Docker daemon is running
+   - Displays platform summary
+
+2. **Clean Previous Logs** (unless `--keep-logs`)
+   - Removes `logs/benchmark/run_*.json`
+   - Removes monitor temporary files
+
+3. **Run Benchmark Loop**
+   - For each iteration:
+     - Tear down existing cluster (`cluster-down.sh`)
+     - Set `BENCHMARK_MODE=1` and `BENCHMARK_RUN_NUMBER`
+     - Execute bootstrap script with timing instrumentation
+     - Save results to `logs/benchmark/run_N.json`
+
+4. **Aggregate Results**
+   - Calculate statistics (mean, median, min, max, stddev)
+   - Generate summary table
+   - Save to `logs/benchmark/summary_TIMESTAMP.json`
+
+### Example Output
+
+```
+=== Platform Summary ===
+  OS:             darwin
+  Arch:           aarch64
+  Nix system:     aarch64-darwin
+  CPU model:      Apple M2 Pro
+  CPU cores:      12
+  Memory (GB):    32
+  Docker version: 27.5.1
+========================
+
+=== Benchmark Configuration ===
+  Mode:       bootstrap
+  Script:     /path/to/scripts/bootstrap.sh
+  Runs:       3
+  Log dir:    /path/to/logs/benchmark
+  Keep logs:  false
+================================
+
+Pre-flight checks passed.
+
+============================================================
+  Benchmark Run 1 / 3
+============================================================
+
+>>> Tearing down existing cluster...
+>>> Starting bootstrap (run 1)...
+[... bootstrap output ...]
+>>> Run 1 complete.
+
+============================================================
+  Benchmark Run 2 / 3
+============================================================
+[... repeated for each run ...]
+
+============================================================
+  Aggregating benchmark results...
+============================================================
+
+============================================================
+  Bootstrap Benchmark Summary (3 runs)
+  Host: aarch64-darwin / Apple M2 Pro / 32GB
+============================================================
+  Step                  | Avg    | Median | Min    | Max    | StdDev | CPU Avg | Mem Peak
+ -----------------------+--------+--------+--------+--------+--------+---------+---------
+  kind-cluster          |  45.2s |  44.8s |  42.1s |  48.7s |   2.3s |  65.3%  | 12.4 GB
+  cilium-install        |  38.1s |  37.5s |  35.2s |  41.6s |   2.8s |  45.2%  | 13.1 GB
+  gen-manifests         |  22.4s |  22.1s |  20.8s |  24.3s |   1.4s |  85.7%  |  9.2 GB
+  otel-collector-image  |  95.3s |  94.0s |  88.7s | 103.2s |   6.1s |  72.4%  | 15.8 GB
+  garage-deploy         |  35.6s |  35.2s |  33.1s |  38.5s |   2.2s |  30.1%  | 14.2 GB
+  observability-stack   |  28.9s |  28.5s |  26.7s |  31.5s |   2.0s |  25.8%  | 15.1 GB
+  postgresql            |  18.2s |  17.9s |  16.5s |  20.2s |   1.5s |  20.3%  | 14.8 GB
+  traefik               |  12.1s |  11.8s |  10.9s |  13.6s |   1.1s |  18.5%  | 14.5 GB
+  wait-pods             |  25.7s |  25.3s |  23.1s |  28.7s |   2.3s |  12.1%  | 14.9 GB
+ -----------------------+--------+--------+--------+--------+--------+---------+---------
+  TOTAL                 | 321.5s | 317.1s | 297.1s | 350.3s |  22.1s |    -    |    -
+============================================================
+
+Summary written to: logs/benchmark/summary_20260308_120000.json
+```
+
+## JSON Output Format
+
+### Per-Run Files (`logs/benchmark/run_N.json`)
+
+```json
+{
+  "session": {
+    "timestamp": "2026-03-08T12:00:00Z",
+    "mode": "bootstrap",
+    "run_number": 1,
+    "host": {
+      "os": "darwin",
+      "arch": "aarch64",
+      "nix_system": "aarch64-darwin",
+      "cpu_model": "Apple M2 Pro",
+      "cpu_cores": 12,
+      "memory_gb": 32,
+      "docker_version": "27.5.1",
+      "is_wsl": false
+    }
+  },
+  "steps": [
+    {
+      "name": "kind-cluster",
+      "duration_sec": 45.234,
+      "exit_code": 0,
+      "resources": {
+        "cpu_avg_percent": 65.3,
+        "cpu_peak_percent": 95.1,
+        "mem_start_mb": 8200,
+        "mem_peak_mb": 12400,
+        "docker_containers": 3
+      }
+    }
+  ],
+  "total_duration_sec": 320.5
+}
+```
+
+### Summary File (`logs/benchmark/summary_TIMESTAMP.json`)
+
+```json
+{
+  "session": {
+    "timestamp": "2026-03-08T12:00:00+09:00",
+    "mode": "bootstrap",
+    "runs": 3,
+    "host": { /* same as above */ }
+  },
+  "runs": [
+    { /* individual run data */ }
+  ],
+  "statistics": {
+    "per_step": {
+      "kind-cluster": {
+        "avg": 45.2,
+        "median": 44.8,
+        "min": 42.1,
+        "max": 48.7,
+        "stddev": 2.3,
+        "cpu_avg": 65.3,
+        "mem_peak_mb": 12400
+      }
+    },
+    "total": {
+      "avg": 321.5,
+      "median": 317.1,
+      "min": 297.1,
+      "max": 350.3,
+      "stddev": 22.1
+    }
+  }
+}
+```
+
+## Integration with Bootstrap Scripts
+
+Bootstrap scripts are instrumented with timing framework (example from scripts/bootstrap.sh):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+export REPO_ROOT
+
+# Source timing libraries
+source "${SCRIPT_DIR}/lib/platform.sh"
+source "${SCRIPT_DIR}/lib/timing.sh"
+source "${SCRIPT_DIR}/lib/monitor.sh"
+
+# Initialize timing session
+timing_init "bootstrap"
+
+# Each step is wrapped with timed_step
+timed_step "kind-cluster" bash "${SCRIPT_DIR}/cluster-up.sh"
+timed_step "gen-manifests" bash "${SCRIPT_DIR}/gen-manifests.sh"
+timed_step "otel-collector-image" bash "${SCRIPT_DIR}/load-otel-collector-image.sh"
+timed_step "kubectl-apply" kubectl apply -f "${REPO_ROOT}/manifests/"
+timed_step "wait-pods" kubectl wait --for=condition=ready pod --all -n observability --timeout=300s
+
+# Generate timing report
+timing_report
+```
+
+### Benefits During Normal Use
+
+Even when not benchmarking, the timing framework provides:
+
+1. **Step Progress**: Clear indication of which step is running
+2. **Duration Feedback**: See how long each step took
+3. **Early Failure Detection**: Failed steps are immediately reported with exit codes
+4. **Performance Awareness**: Developers can spot slow steps during normal development
+
+## Statistics Aggregation
+
+The `scripts/lib/aggregate-stats.py` Python script processes benchmark runs:
+
+**Calculated Statistics**:
+- **Mean (Average)**: Sum of values / count
+- **Median**: Middle value when sorted
+- **Minimum**: Fastest run
+- **Maximum**: Slowest run
+- **Standard Deviation**: Measure of variance
+
+**Output Formats**:
+1. **Console table**: Human-readable summary
+2. **JSON file**: Machine-readable for analysis
+
+## Use Cases
+
+### 1. Identify Bottlenecks
+
+Find the slowest steps in your bootstrap process:
+
+```bash
+benchmark bootstrap 5
+# Look for steps with highest avg duration
+```
+
+### 2. Compare Architectures
+
+Benchmark on different platforms:
+
+```bash
+# On Apple Silicon Mac
+benchmark bootstrap 3
+
+# On Intel Mac
+benchmark bootstrap 3
+
+# On Linux x86_64
+benchmark bootstrap 3
+
+# Compare summary JSON files
+```
+
+### 3. Measure Optimization Impact
+
+Before and after optimization:
+
+```bash
+# Baseline
+benchmark bootstrap 5
+cp logs/benchmark/summary_*.json baseline.json
+
+# Apply optimization
+# ...
+
+# Measure again
+benchmark bootstrap 5
+cp logs/benchmark/summary_*.json optimized.json
+
+# Compare results
+```
+
+### 4. CI/CD Performance Tracking
+
+Track performance regressions:
+
+```bash
+# Run benchmark in CI
+benchmark bootstrap 3
+
+# Upload summary JSON to artifact storage
+# Compare against previous runs
+```
+
+## Performance Tips
+
+### Pre-warming Caches
+
+For consistent measurements:
+
+```bash
+# Warm up Nix store
+nix build .#legacyPackages.$(nix eval --raw --impure --expr 'builtins.currentSystem').nixidyEnvs.local.environmentPackage
+
+# Warm up Docker image cache
+docker pull kindest/node:latest
+
+# Then run benchmark
+benchmark bootstrap 5
+```
+
+### Reducing Variance
+
+1. **Close background applications**: Minimize CPU/memory competition
+2. **Use consistent Docker resources**: Set fixed CPU/memory limits
+3. **Run multiple iterations**: 5-10 runs for stable statistics
+4. **Avoid network-dependent steps**: Use local mirrors when possible
+
+## Troubleshooting
+
+### High Standard Deviation
+
+If stddev is >10% of mean:
+- Increase number of runs
+- Check for background processes
+- Verify network stability
+- Look for non-deterministic steps
+
+### Missing Resource Data
+
+If resource metrics are missing:
+- Ensure monitor.sh is sourced
+- Check platform support (macOS vs Linux)
+- Verify required tools are installed (top, docker stats)
+
+### Benchmark Hangs
+
+If benchmark doesn't complete:
+- Check kubectl wait timeouts
+- Verify cluster has sufficient resources
+- Look for pod crash loops
+- Use `debug-k8s` command to investigate
+
+## Future Optimizations (Phase 2)
+
+Based on benchmark data, Phase 2 will consider:
+
+1. **Parallelization**: Run independent steps concurrently
+2. **Nix Build Cache**: Optimize nix store usage
+3. **Image Pre-building**: Cache OTel Collector images in R2
+4. **Helm Repo Caching**: Skip `helm repo update` when possible
+5. **Batch kubectl apply**: Reduce API server round trips
+6. **Dynamic Node Scaling**: Adjust kind cluster size based on workload
+
+## Best Practices
+
+1. **Always run multiple iterations**: Single runs are not reliable
+2. **Document your environment**: Include host specs in reports
+3. **Use consistent conditions**: Same Docker settings, same Nix cache state
+4. **Track over time**: Compare against historical data
+5. **Focus on median**: Less affected by outliers than mean
+6. **Investigate high variance**: Stddev >10% indicates instability
+
+## Next Steps
+
+- Set up [development environment](/development/environment-setup)
+- Learn about [nixidy modules](/development/nixidy)
+- Create [Grafana dashboards](/development/dashboards)

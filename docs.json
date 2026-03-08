@@ -1,122 +1,108 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Microservices Infrastructure",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#326ce5",
+    "light": "#5b8def",
+    "dark": "#1e4ba1"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/hackz-megalo-cup/microservices-infra"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/hackz-megalo-cup/microservices-infra"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Getting Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "prerequisites",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Bootstrap Modes",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "bootstrap/dev-fast",
+              "bootstrap/cilium-mode",
+              "bootstrap/full-mode",
+              "bootstrap/comparison"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Architecture",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "architecture/overview",
+              "architecture/kubernetes",
+              "architecture/networking",
+              "architecture/service-mesh",
+              "architecture/observability",
+              "architecture/gitops"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Operations",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "operations/cluster-management",
+              "operations/manifest-generation",
+              "operations/secrets-management",
+              "operations/monitoring",
+              "operations/troubleshooting"
+            ]
+          },
+          {
+            "group": "Components",
+            "pages": [
+              "components/kind",
+              "components/cilium",
+              "components/istio",
+              "components/argocd",
+              "components/traefik",
+              "components/prometheus",
+              "components/grafana",
+              "components/loki",
+              "components/tempo",
+              "components/garage",
+              "components/postgresql"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/environment-setup",
+              "development/nixidy",
+              "development/dashboards",
+              "development/benchmarking"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "CLI Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Commands",
             "pages": [
-              "api-reference/introduction"
-            ]
-          },
-          {
-            "group": "Endpoint examples",
-            "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "cli/bootstrap",
+              "cli/cluster",
+              "cli/manifests",
+              "cli/monitoring",
+              "cli/utilities"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

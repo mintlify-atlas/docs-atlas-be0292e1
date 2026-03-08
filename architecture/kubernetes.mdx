@@ -1,0 +1,351 @@
+---
+title: Kubernetes Configuration
+description: Kind cluster setup, node topology, and port mappings
+---
+
+The platform uses [Kind](https://kind.sigs.k8s.io/) (Kubernetes in Docker) to provide a production-like Kubernetes environment on a local machine. Kind is ideal for development because it supports multi-node clusters, custom CNI plugins, and advanced features like service mesh integration.
+
+## Cluster Profiles
+
+Three Kind configurations are provided to support different development workflows:
+
+### kind-config-dev.yaml (Dev-Fast)
+
+Optimized for rapid iteration with minimal overhead:
+
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: microservice-infra
+nodes:
+  - role: control-plane
+```
+
+**Features:**
+- Single control-plane node (no workers)
+- Uses kindnetd (built-in CNI)
+- Aggressive resource settings for fast startup
+- Event and etcd garbage collection tuned for speed
+
+**Configuration highlights:**
+
+```yaml
+kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        event-ttl: "15m"  # Clear events after 15 minutes
+    etcd:
+      local:
+        extraArgs:
+          auto-compaction-mode: "periodic"
+          auto-compaction-retention: "5m"  # Compact every 5 minutes
+  - |
+    kind: KubeletConfiguration
+    imageGCHighThresholdPercent: 100  # Never GC images automatically
+    evictionHard:
+      nodefs.available: "0%"  # Disable eviction (dev only!)
+      nodefs.inodesFree: "0%"
+      imagefs.available: "0%"
+```
+
+<Warning>
+  These settings are **only for local development**. Never use them in production as they disable critical safety mechanisms.
+</Warning>
+
+### kind-config-lite.yaml (Cilium)
+
+Balances features with startup time:
+
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: microservice-infra
+networking:
+  disableDefaultCNI: true  # Allow Cilium installation
+nodes:
+  - role: control-plane
+  - role: worker
+```
+
+**Features:**
+- 1 control-plane + 1 worker (2 nodes total)
+- Cilium CNI with Hubble UI
+- Production-like networking
+- eBPF observability
+
+### kind-config.yaml (Full)
+
+Complete production-parity environment:
+
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: microservice-infra
+networking:
+  disableDefaultCNI: true
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+  - role: worker
+  - role: worker
+```
+
+**Features:**
+- 1 control-plane + 2 workers (3 nodes total)
+- Cilium CNI + Istio ambient mode
+- Distributed workload scheduling
+- Full L4 + L7 service mesh capabilities
+
+## Port Mappings
+
+All clusters expose services via `extraPortMappings` on the control-plane node. This maps container ports to localhost:
+
+```yaml
+extraPortMappings:
+  # ArgoCD HTTP
+  - containerPort: 30080
+    hostPort: 30080
+    protocol: TCP
+  # ArgoCD HTTPS
+  - containerPort: 30443
+    hostPort: 30443
+    protocol: TCP
+  # Grafana
+  - containerPort: 30300
+    hostPort: 30300
+    protocol: TCP
+  # Traefik HTTP
+  - containerPort: 30081
+    hostPort: 30081
+    protocol: TCP
+  # Traefik HTTPS
+  - containerPort: 30444
+    hostPort: 30444
+    protocol: TCP
+  # Hubble UI
+  - containerPort: 31235
+    hostPort: 31235
+    protocol: TCP
+  # Prometheus UI
+  - containerPort: 30090
+    hostPort: 30090
+    protocol: TCP
+  # Alertmanager UI
+  - containerPort: 30093
+    hostPort: 30093
+    protocol: TCP
+```
+
+### Port Allocation Strategy
+
+| Port Range | Purpose | Example |
+|------------|---------|----------|
+| 30080-30099 | ArgoCD and management UIs | 30080 (ArgoCD), 30090 (Prometheus) |
+| 30100-30299 | Application services | Reserved for apps |
+| 30300-30399 | Observability UIs | 30300 (Grafana) |
+| 30400-30499 | Edge services | 30444 (Traefik HTTPS) |
+| 31200-31299 | Network observability | 31235 (Hubble UI) |
+
+## Node Labels and Taints
+
+The control-plane node is labeled for ingress readiness:
+
+```yaml
+node-labels: "ingress-ready=true"
+```
+
+This allows Traefik and other ingress controllers to schedule on the control-plane node, which has the port mappings configured.
+
+## CNI Configuration
+
+When using Cilium (lite or full configs), the default CNI is disabled:
+
+```yaml
+networking:
+  disableDefaultCNI: true
+```
+
+This prevents kindnetd from installing, allowing Cilium to manage all networking. The Cilium installation happens via the bootstrap scripts:
+
+```bash
+# scripts/cilium-install.sh
+helm upgrade --install cilium oci://quay.io/cilium/charts/cilium \
+  --version "${CILIUM_VERSION}" \
+  --namespace kube-system \
+  --set ipam.mode=kubernetes \
+  --set cni.exclusive=false \
+  --set socketLB.hostNamespaceOnly=true \
+  --set kubeProxyReplacement=false
+```
+
+### Cilium Configuration for Istio Compatibility
+
+Key settings ensure Cilium co-exists with Istio:
+
+- `cni.exclusive=false`: Allows Istio's CNI plugin to chain with Cilium
+- `socketLB.hostNamespaceOnly=true`: Prevents interference with Istio's traffic redirection
+- `kubeProxyReplacement=false`: Uses kube-proxy for safer Istio compatibility
+
+## Cluster Lifecycle
+
+The platform provides scripts for managing cluster state:
+
+### Create and Destroy
+
+```bash
+# Create cluster
+cluster-up
+
+# Destroy cluster (deletes all data)
+cluster-down
+```
+
+### Pause and Resume
+
+```bash
+# Stop cluster (preserves state)
+cluster-stop
+
+# Restart cluster
+cluster-start
+```
+
+The pause/resume functionality uses Docker container lifecycle:
+
+```bash
+# scripts/cluster-stop.sh
+docker stop microservice-infra-control-plane
+docker stop microservice-infra-worker || true
+docker stop microservice-infra-worker2 || true
+```
+
+```bash
+# scripts/cluster-start.sh
+docker start microservice-infra-control-plane
+docker start microservice-infra-worker || true
+docker start microservice-infra-worker2 || true
+kubectl wait --for=condition=Ready nodes --all --timeout=120s
+```
+
+## Bootstrap Hash System
+
+The platform implements intelligent cluster management using content hashes:
+
+### Hash Computation
+
+```bash
+# Cluster hash: kind config + image versions
+_compute_cluster_hash() {
+  cat "${KIND_CONFIG}" "${SCRIPT_DIR}/lib/images.sh" \
+    | shasum -a 256 | cut -d' ' -f1
+}
+
+# Manifest hash: all generated YAML
+_compute_manifest_hash() {
+  find "${REPO_ROOT}/manifests-result" -type f -print0 | sort -z | xargs -0 cat \
+    | shasum -a 256 | cut -d' ' -f1
+}
+```
+
+### Warm Cluster Logic
+
+```bash
+if _cluster_healthy; then
+  if [[ "$cluster_hash" != "$stored_cluster_hash" ]]; then
+    # Cluster config changed → full rebuild
+    kind delete cluster --name "${CLUSTER_NAME}"
+    _cold_start
+  else
+    manifest_hash="$(_compute_manifest_hash)"
+    if [[ "$manifest_hash" != "$stored_manifest_hash" ]]; then
+      # Only manifests changed → reapply
+      _warm_reapply
+    else
+      # Everything up-to-date → skip
+      _warm_verify
+    fi
+  fi
+fi
+```
+
+**Benefits:**
+- 2nd+ runs are instant if nothing changed
+- Only reapplies manifests when needed
+- Automatic detection of configuration drift
+- No manual cleanup required
+
+## Resource Requirements
+
+### Minimum Specifications
+
+| Mode | CPU | Memory | Disk |
+|------|-----|--------|------|
+| Dev-Fast | 2 cores | 4 GB | 10 GB |
+| Cilium | 4 cores | 8 GB | 15 GB |
+| Full | 6 cores | 12 GB | 20 GB |
+
+### Recommended Specifications
+
+| Mode | CPU | Memory | Disk |
+|------|-----|--------|------|
+| Dev-Fast | 4 cores | 8 GB | 20 GB |
+| Cilium | 8 cores | 16 GB | 30 GB |
+| Full | 12 cores | 24 GB | 40 GB |
+
+## Troubleshooting
+
+### Cluster Won't Start
+
+Check Docker is running and has sufficient resources:
+
+```bash
+docker info
+kind get clusters
+```
+
+### Nodes Not Ready
+
+Inspect node conditions:
+
+```bash
+kubectl get nodes -o wide
+kubectl describe node microservice-infra-control-plane
+```
+
+### Port Conflicts
+
+If ports are already in use, modify the `extraPortMappings` in your kind config:
+
+```yaml
+extraPortMappings:
+  - containerPort: 30300
+    hostPort: 31300  # Changed to avoid conflict
+    protocol: TCP
+```
+
+### CNI Installation Failed
+
+For Cilium issues, check the installation:
+
+```bash
+cilium status
+kubectl get pods -n kube-system -l k8s-app=cilium
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Networking" icon="network-wired" href="/architecture/networking">
+    Learn how Cilium provides eBPF-based networking
+  </Card>
+  <Card title="Service Mesh" icon="diagram-project" href="/architecture/service-mesh">
+    Explore Istio ambient mode configuration
+  </Card>
+</CardGroup>

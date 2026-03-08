@@ -1,0 +1,390 @@
+---
+title: Nixidy Module System
+description: Understanding and working with nixidy modules for Kubernetes manifest generation
+---
+
+## Overview
+
+[nixidy](https://github.com/arnarg/nixidy) is a declarative Kubernetes manifest generator that uses Nix to create ArgoCD applications. The project uses nixidy to manage all Kubernetes resources with type safety, composability, and reproducibility.
+
+## Integration
+
+Nixidy is integrated via Nix flakes (flake.nix:15-18):
+
+```nix
+nixidy = {
+  url = "github:arnarg/nixidy";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+Helm charts are provided by [nixhelm](https://github.com/farcaller/nixhelm) (flake.nix:19-22):
+
+```nix
+nixhelm = {
+  url = "github:farcaller/nixhelm";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+## Directory Structure
+
+Nixidy modules are organized in the `nixidy/env/` directory:
+
+```
+nixidy/
+└── env/
+    ├── local.nix              # Local environment configuration
+    ├── prod.nix               # Production environment configuration
+    └── local/
+        ├── argocd.nix         # ArgoCD installation
+        ├── garage.nix         # S3-compatible storage
+        ├── kube-prometheus-stack.nix
+        ├── loki.nix           # Log aggregation
+        ├── tempo.nix          # Distributed tracing
+        ├── otel-collector.nix # Custom OTel Collector
+        ├── sample-app.nix     # Demo application
+        ├── traefik.nix        # Ingress controller
+        ├── grafana-dashboards.nix
+        ├── image-updater.nix  # ArgoCD image updater
+        ├── cloudflared.nix    # Cloudflare Tunnel
+        └── postgresql.nix     # Database
+```
+
+## Environment Definitions
+
+### Local Environment
+
+The local environment (nixidy/env/local.nix) imports all application modules:
+
+```nix
+{ ... }:
+{
+  imports = [
+    ./local/argocd.nix
+    ./local/garage.nix
+    ./local/kube-prometheus-stack.nix
+    ./local/loki.nix
+    ./local/tempo.nix
+    ./local/otel-collector.nix
+    ./local/sample-app.nix
+    ./local/traefik.nix
+    ./local/grafana-dashboards.nix
+    ./local/image-updater.nix
+    ./local/cloudflared.nix
+    ./local/postgresql.nix
+  ];
+
+  nixidy = {
+    target = {
+      repository = "https://github.com/thirdlf03/microservice-infra";
+      branch = "main";
+      rootPath = "./manifests";
+    };
+
+    defaults = {
+      destination.server = "https://kubernetes.default.svc";
+
+      syncPolicy = {
+        autoSync = {
+          enable = true;
+          prune = true;
+          selfHeal = true;
+        };
+      };
+    };
+
+    appOfApps = {
+      name = "apps";
+      namespace = "argocd";
+    };
+  };
+}
+```
+
+### Production Environment
+
+The production environment (nixidy/env/prod.nix) is a subset with security overrides:
+
+```nix
+{ lib, ... }:
+{
+  imports = [
+    ./local/argocd.nix
+    ./local/kube-prometheus-stack.nix
+    ./local/loki.nix
+    ./local/tempo.nix
+    ./local/otel-collector.nix
+    ./local/traefik.nix
+    ./local/grafana-dashboards.nix
+    ./local/image-updater.nix
+  ];
+
+  nixidy = {
+    target = {
+      repository = "https://github.com/thirdlf03/microservice-infra";
+      branch = "main";
+      rootPath = "./manifests/prod";
+    };
+
+    defaults = {
+      destination.server = "https://kubernetes.default.svc";
+      syncPolicy = {
+        autoSync = {
+          enable = true;
+          prune = true;
+          selfHeal = true;
+        };
+      };
+    };
+
+    appOfApps = {
+      name = "apps";
+      namespace = "argocd";
+    };
+  };
+
+  # Production overrides
+  applications.argocd.helm.releases.argocd.values = {
+    server = {
+      service = {
+        type = lib.mkForce "ClusterIP";
+        nodePortHttp = lib.mkForce null;
+        nodePortHttps = lib.mkForce null;
+      };
+      extraArgs = lib.mkForce [ ];
+    };
+    configs.params = {
+      "server.insecure" = lib.mkForce false;
+    };
+  };
+}
+```
+
+## Creating Application Modules
+
+Application modules follow a consistent structure. Here's an example from nixidy/env/local/argocd.nix:
+
+```nix
+{ charts, ... }:
+{
+  applications.argocd = {
+    namespace = "argocd";
+    createNamespace = true;
+
+    helm.releases.argocd = {
+      chart = charts.argoproj.argo-cd;
+
+      values = {
+        global.domain = "argocd.local";
+
+        server = {
+          replicas = 1;
+          service = {
+            type = "NodePort";
+            nodePortHttp = 30080;
+            nodePortHttps = 30443;
+          };
+          extraArgs = [ "--insecure" ];
+        };
+
+        controller.replicas = 1;
+        redis.enabled = true;
+        dex.enabled = false;
+
+        configs.params = {
+          "server.insecure" = true;
+        };
+      };
+    };
+  };
+}
+```
+
+### Module Structure
+
+1. **Application Declaration**: `applications.<name>`
+2. **Namespace**: Set namespace and optionally create it
+3. **Helm Release**: Configure chart and values
+4. **Chart Reference**: Use charts from nixhelm (e.g., `charts.prometheus-community.kube-prometheus-stack`)
+
+### Helm Chart Access
+
+Charts are injected via the `charts` parameter, which comes from nixhelm. Available chart repositories include:
+
+- `charts.argoproj.*` - ArgoCD and related tools
+- `charts.prometheus-community.*` - Prometheus ecosystem
+- `charts.grafana.*` - Grafana and Loki
+- And many more...
+
+## Advanced Patterns
+
+### Using Raw Manifests
+
+For resources not managed by Helm, use the `resources` attribute (from nixidy/env/local/grafana-dashboards.nix):
+
+```nix
+{ pkgs, ... }:
+let
+  compileDashboard = name:
+    builtins.readFile (
+      pkgs.runCommand "grafana-dashboard-${name}" 
+        { nativeBuildInputs = [ pkgs.go-jsonnet ]; } ''
+        mkdir -p $out
+        mkdir -p vendor/github.com/grafana
+        ln -s ${grafonnet-src} vendor/github.com/grafana/grafonnet
+        export JSONNET_PATH="vendor:${grafonnet-src}/gen/grafonnet-latest:${dashboardsSrc}"
+        jsonnet ${dashboardsSrc}/${name}.jsonnet -o $out/${name}.json
+      ''
+      + "/${name}.json"
+    );
+in
+{
+  applications.kube-prometheus-stack = {
+    resources.configMaps.sample-app-dashboard = {
+      metadata.labels = {
+        grafana_dashboard = "1";
+      };
+      data."sample-app.json" = compileDashboard "sample-app";
+    };
+  };
+}
+```
+
+This pattern:
+1. Compiles Jsonnet dashboards at build time
+2. Injects them as ConfigMaps
+3. Uses Grafana's dashboard sidecar to auto-discover them
+
+### Sync Options
+
+For resources requiring server-side apply (from nixidy/env/local/kube-prometheus-stack.nix:7):
+
+```nix
+applications.kube-prometheus-stack = {
+  namespace = "observability";
+  createNamespace = true;
+  syncPolicy.syncOptions.serverSideApply = true;
+  ...
+};
+```
+
+## Generating Manifests
+
+### Manual Generation
+
+To regenerate manifests from nixidy modules:
+
+```bash
+gen-manifests
+```
+
+This script (scripts/gen-manifests.sh):
+1. Detects platform using `platform.sh`
+2. Builds the nixidy environment package
+3. Copies manifests to `manifests/`
+4. Removes the self-referencing ArgoCD application
+5. Shows a git diff summary
+
+**Implementation**:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+source "${SCRIPT_DIR}/lib/platform.sh"
+
+echo "==> Building nixidy manifests..."
+nix build "${REPO_ROOT}#legacyPackages.${PLATFORM_NIX_SYSTEM}.nixidyEnvs.local.environmentPackage" -o "${REPO_ROOT}/manifests-result"
+
+echo "==> Copying to manifests/..."
+rm -rf "${REPO_ROOT}/manifests"
+cp -rL "${REPO_ROOT}/manifests-result" "${REPO_ROOT}/manifests"
+chmod -R u+w "${REPO_ROOT}/manifests"
+
+rm -f "${REPO_ROOT}/manifests/apps/Application-argocd.yaml"
+
+echo "==> Done. manifests/ updated."
+echo ""
+git -C "${REPO_ROOT}" --no-pager diff --stat -- manifests/
+```
+
+### Automatic Regeneration
+
+Use `watch-manifests` to automatically regenerate and apply manifests on file changes:
+
+```bash
+watch-manifests
+```
+
+## Flake Integration
+
+Nixidy environments are exposed as flake outputs (flake.nix:111-122):
+
+```nix
+legacyPackages.nixidyEnvs = {
+  local = inputs.nixidy.lib.mkEnv {
+    inherit pkgs;
+    charts = inputs.nixhelm.chartsDerivations.${system};
+    modules = [ ./nixidy/env/local.nix ];
+  };
+  prod = inputs.nixidy.lib.mkEnv {
+    inherit pkgs;
+    charts = inputs.nixhelm.chartsDerivations.${system};
+    modules = [ ./nixidy/env/prod.nix ];
+  };
+};
+```
+
+### Building Specific Environments
+
+```bash
+# Build local environment
+nix build .#legacyPackages.aarch64-darwin.nixidyEnvs.local.environmentPackage
+
+# Build production environment
+nix build .#legacyPackages.aarch64-darwin.nixidyEnvs.prod.environmentPackage
+```
+
+## Debugging
+
+### Validate Nix Expressions
+
+Quickly check if nixidy modules evaluate correctly:
+
+```bash
+nix-check
+```
+
+### Fix Chart Hashes
+
+If you encounter empty `chartHash` errors:
+
+```bash
+fix-chart-hash
+```
+
+### Inspect Generated Manifests
+
+After running `gen-manifests`, inspect the output:
+
+```bash
+ls -la manifests/
+cat manifests/apps/Application-*.yaml
+```
+
+## Best Practices
+
+1. **Module Organization**: Keep one application per file in `nixidy/env/local/`
+2. **Environment Parity**: Use `lib.mkForce` in prod.nix to override security-sensitive defaults
+3. **Chart Versions**: Let nixhelm manage chart versions for reproducibility
+4. **Sync Policies**: Enable auto-sync, prune, and self-heal for GitOps workflow
+5. **Namespace Management**: Use `createNamespace = true` for application-specific namespaces
+
+## Next Steps
+
+- Learn about [environment setup](/development/environment-setup)
+- Explore [Grafana dashboard integration](/development/dashboards)
+- Run [performance benchmarks](/development/benchmarking)

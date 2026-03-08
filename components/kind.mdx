@@ -1,0 +1,86 @@
+---
+title: Kind Cluster
+description: Local Kubernetes cluster for development
+---
+
+## Overview
+
+Kind (Kubernetes in Docker) provides the foundational Kubernetes cluster for local development. The cluster configuration supports multiple deployment modes with different performance and feature tradeoffs.
+
+## Cluster Configuration
+
+The infrastructure supports three Kind configurations:
+
+### Standard Configuration (`kind-config.yaml`)
+
+```yaml
+name: microservice-infra
+networking:
+  disableDefaultCNI: true  # Cilium will be installed separately
+nodes:
+  - role: control-plane (with ingress-ready label)
+  - role: worker
+  - role: worker
+```
+
+This is the full production-like setup with:
+- **1 control plane node + 2 worker nodes**
+- **Cilium CNI** (default CNI disabled)
+- All port mappings for services
+
+### Port Mappings
+
+The control plane node exposes these ports to the host:
+
+| Container Port | Host Port | Service |
+|---|---|---|
+| 30080 | 30080 | ArgoCD HTTP |
+| 30443 | 30443 | ArgoCD HTTPS |
+| 30300 | 30300 | Grafana |
+| 30081 | 30081 | Traefik HTTP |
+| 30444 | 30444 | Traefik HTTPS |
+| 31235 | 31235 | Hubble UI |
+| 30090 | 30090 | Prometheus UI |
+| 30093 | 30093 | Alertmanager UI |
+
+All ports use TCP protocol and are mapped through the ingress-ready control plane node.
+
+## Node Configuration
+
+The control plane node is labeled with `ingress-ready=true` to allow NodePort services to be accessible from the host machine. This is configured via kubeadm patches:
+
+```yaml
+kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+```
+
+## CNI Configuration
+
+The cluster disables the default CNI (`disableDefaultCNI: true`) to allow Cilium to be installed as the primary CNI provider. This enables:
+
+- Advanced networking features
+- Network policies
+- Hubble observability
+- Integration with Istio service mesh
+
+## Bootstrap Integration
+
+Kind clusters are created and managed through bootstrap scripts:
+
+- `cluster-up` - Creates the Kind cluster
+- `cluster-down` - Deletes the cluster
+- `cluster-start` - Starts a stopped cluster
+- `cluster-stop` - Stops the cluster without deleting
+
+## Configuration Variants
+
+In addition to the standard configuration, the project includes:
+
+- **`kind-config-lite.yaml`** - Lightweight configuration for faster setup
+- **`kind-config-dev.yaml`** - Development-optimized configuration
+
+See `k8s/` directory for all configuration files.

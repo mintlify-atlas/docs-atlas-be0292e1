@@ -1,0 +1,276 @@
+---
+title: Cluster Management
+description: Manage the lifecycle of your local kind cluster
+---
+
+Cluster management commands control the kind cluster lifecycle. Use these commands for fine-grained control over cluster state.
+
+## cluster-up
+
+Create a new kind cluster or verify existing cluster.
+
+### Syntax
+
+```bash
+cluster-up
+```
+
+### Behavior
+
+- Checks if cluster `microservice-infra` already exists
+- Creates new cluster from `k8s/kind-config.yaml` if not found
+- Sets kubectl context to `kind-microservice-infra`
+- Displays cluster info
+
+### Example
+
+```bash
+# Create cluster
+cluster-up
+```
+
+### Output
+
+```
+Creating kind cluster 'microservice-infra'...
+Cluster created. Context set to kind-microservice-infra.
+
+Kubernetes control plane is running at https://127.0.0.1:...
+```
+
+### Kind Configuration
+
+The cluster is created from `k8s/kind-config.yaml` which defines:
+
+- Control plane node configuration
+- Worker node count and resources
+- Port mappings for services (30080-30300)
+- Container runtime settings
+
+### Related Commands
+
+- [cluster-down](#cluster-down) - Destroy cluster
+- [bootstrap](/cli/bootstrap#bootstrap) - Create and configure cluster
+
+---
+
+## cluster-down
+
+Destroy the kind cluster completely.
+
+### Syntax
+
+```bash
+cluster-down
+```
+
+### Behavior
+
+- Checks if cluster `microservice-infra` exists
+- Deletes cluster and all associated resources
+- Removes Docker containers and volumes
+- Safe to run if cluster doesn't exist
+
+### Example
+
+```bash
+# Destroy cluster
+cluster-down
+```
+
+### Output
+
+```
+Deleting kind cluster 'microservice-infra'...
+Cluster deleted.
+```
+
+<Warning>
+This operation is destructive and cannot be undone. All cluster data will be permanently lost.
+</Warning>
+
+### Use Cases
+
+- Clean up development environment
+- Force fresh cluster creation
+- Free system resources
+- Recover from corrupted cluster state
+
+### Related Commands
+
+- [cluster-up](#cluster-up) - Create new cluster
+- [cluster-stop](#cluster-stop) - Preserve state
+- [bootstrap --clean](/cli/bootstrap#bootstrap) - Full clean rebuild
+
+---
+
+## cluster-stop
+
+Stop cluster containers without deleting (preserves state for fast restart).
+
+### Syntax
+
+```bash
+cluster-stop
+```
+
+### Behavior
+
+- Finds all Docker containers for cluster `microservice-infra`
+- Stops containers but preserves volumes and configuration
+- Safe to run if cluster is already stopped
+- Cluster state is preserved on disk
+
+### Example
+
+```bash
+# Stop cluster
+cluster-stop
+```
+
+### Output
+
+```
+Stopping kind cluster 'microservice-infra'...
+Cluster stopped. Use 'cluster-start' to resume.
+```
+
+### Use Cases
+
+- Free CPU and memory temporarily
+- Pause development work
+- Switch to different cluster
+- Preserve cluster state for later
+
+### State Preservation
+
+The following are preserved:
+
+- All Kubernetes resources (pods, services, volumes)
+- PersistentVolume data
+- Container images loaded in cluster
+- Cluster configuration
+
+### Related Commands
+
+- [cluster-start](#cluster-start) - Resume stopped cluster
+- [cluster-down](#cluster-down) - Permanently delete
+
+---
+
+## cluster-start
+
+Start previously stopped cluster containers.
+
+### Syntax
+
+```bash
+cluster-start
+```
+
+### Behavior
+
+1. Finds all Docker containers for cluster `microservice-infra`
+2. Checks if cluster is already running
+3. Starts stopped containers
+4. Waits for Kubernetes API server to be ready
+5. Sets kubectl context to `kind-microservice-infra`
+6. Displays node status
+
+### Example
+
+```bash
+# Start stopped cluster
+cluster-start
+```
+
+### Output
+
+```
+Starting kind cluster 'microservice-infra'...
+Waiting for API server...
+Cluster started.
+
+NAME                                STATUS   ROLES           AGE   VERSION
+microservice-infra-control-plane    Ready    control-plane   2d    v1.31.0
+microservice-infra-worker           Ready    <none>          2d    v1.31.0
+microservice-infra-worker2          Ready    <none>          2d    v1.31.0
+```
+
+### Error Handling
+
+```bash
+# If no containers found
+No containers found for cluster 'microservice-infra'. Run 'bootstrap' first.
+
+# If already running
+Cluster 'microservice-infra' is already running.
+```
+
+### Recovery Time
+
+Starting a stopped cluster is significantly faster than rebuilding:
+
+- Stop/Start: ~5-10 seconds
+- Full rebuild: ~3-5 minutes
+
+### Use Cases
+
+- Resume development work
+- Quick cluster recovery after system reboot
+- Restore cluster after freeing resources
+
+### Related Commands
+
+- [cluster-stop](#cluster-stop) - Stop cluster
+- [bootstrap](/cli/bootstrap#bootstrap) - Create new cluster
+
+---
+
+## Cluster Lifecycle Comparison
+
+| Command | State | Speed | Use Case |
+|---------|-------|-------|----------|
+| `cluster-up` | Creates new | Slow | Initial setup |
+| `cluster-down` | Destroys | N/A | Clean slate |
+| `cluster-stop` | Preserves | Fast | Temporary pause |
+| `cluster-start` | Restores | Fast | Resume work |
+| `bootstrap` | Creates & configures | Medium | Dev setup |
+| `bootstrap-full` | Creates & configures | Slow | Full setup |
+
+## Best Practices
+
+### Daily Development
+
+```bash
+# Start your day
+cluster-start
+
+# End your day
+cluster-stop
+```
+
+### Clean Rebuild
+
+```bash
+# When you need fresh state
+cluster-down
+bootstrap
+```
+
+### Configuration Changes
+
+```bash
+# When kind-config.yaml changes
+bootstrap --clean
+```
+
+### Resource Management
+
+```bash
+# Free up resources temporarily
+cluster-stop
+
+# Free up resources permanently
+cluster-down
+```

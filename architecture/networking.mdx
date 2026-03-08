@@ -1,0 +1,415 @@
+---
+title: Networking Architecture
+description: Cilium CNI, Hubble observability, and eBPF-based network policies
+---
+
+The platform uses [Cilium](https://cilium.io/) as the Container Network Interface (CNI) plugin, providing high-performance, eBPF-based networking with deep observability via Hubble.
+
+## Why Cilium?
+
+Cilium leverages eBPF (extended Berkeley Packet Filter) to provide networking capabilities directly in the Linux kernel:
+
+- **Performance**: No iptables overhead; packets processed at kernel level
+- **Observability**: Real-time visibility into L3-L7 traffic flows
+- **Security**: Identity-based network policies independent of IP addresses
+- **Scalability**: Handles large-scale Kubernetes deployments efficiently
+- **Compatibility**: Co-exists with Istio for combined L3/L4 + L7 capabilities
+
+## Cilium Installation
+
+Cilium is installed via Helm with Istio-compatible settings:
+
+```bash
+# scripts/cilium-install.sh
+helm upgrade --install cilium oci://quay.io/cilium/charts/cilium \
+  --version "${CILIUM_VERSION}" \
+  --namespace kube-system \
+  --set image.pullPolicy=IfNotPresent \
+  --set ipam.mode=kubernetes \
+  --set cni.exclusive=false \
+  --set socketLB.hostNamespaceOnly=true \
+  --set kubeProxyReplacement=false \
+  --set hubble.enabled=true \
+  --set hubble.relay.enabled=true \
+  --set hubble.ui.enabled=true \
+  --set hubble.ui.service.type=NodePort \
+  --set hubble.ui.service.nodePort=31235
+```
+
+### Key Configuration Options
+
+| Setting | Value | Purpose |
+|---------|-------|----------|
+| `ipam.mode` | `kubernetes` | Use Kubernetes' native IPAM for pod IPs |
+| `cni.exclusive` | `false` | Allow CNI plugin chaining with Istio |
+| `socketLB.hostNamespaceOnly` | `true` | Prevent interference with Istio traffic redirection |
+| `kubeProxyReplacement` | `false` | Use kube-proxy for safer Istio compatibility |
+| `hubble.enabled` | `true` | Enable Hubble observability |
+| `hubble.ui.service.type` | `NodePort` | Expose Hubble UI externally |
+
+## IPAM Configuration
+
+Cilium uses Kubernetes-native IPAM mode:
+
+```yaml
+ipam:
+  mode: kubernetes
+```
+
+This delegates IP address management to Kubernetes' built-in controller, ensuring consistency with kube-proxy and other components.
+
+**Benefits:**
+- Simpler integration with existing Kubernetes clusters
+- No additional IPAM daemon required
+- Compatible with `hostNetwork` pods
+- Works seamlessly with Kind's networking model
+
+## CNI Plugin Chaining
+
+To support Istio ambient mode, Cilium is configured for CNI chaining:
+
+```yaml
+cni:
+  exclusive: false
+```
+
+This allows Istio's CNI plugin to set up iptables rules for traffic redirection while Cilium handles core networking.
+
+**Chain order:**
+1. Cilium CNI: Provides pod networking and eBPF datapath
+2. Istio CNI: Configures traffic redirection to ztunnel
+
+## Socket Load Balancing
+
+Socket-level load balancing is restricted to host namespace:
+
+```yaml
+socketLB:
+  hostNamespaceOnly: true
+```
+
+This prevents Cilium from intercepting socket operations inside pods, which would interfere with Istio's transparent proxying.
+
+## Hubble Observability
+
+Hubble is Cilium's observability platform, providing network and security visibility.
+
+### Architecture
+
+```
+Cilium Agent (per node)
+  ↓ (gRPC)
+Hubble Relay (cluster-wide aggregator)
+  ↓ (gRPC)
+Hubble UI / Hubble CLI
+```
+
+### Components
+
+**Hubble Server** (embedded in Cilium agent):
+- Collects flow data from eBPF maps
+- Provides gRPC API for local node queries
+- Stores recent flows in circular buffer
+
+**Hubble Relay**:
+- Aggregates data from all Cilium agents
+- Provides cluster-wide flow visibility
+- Filters and correlates flows across nodes
+
+**Hubble UI**:
+- Web-based visualization of service map
+- Real-time traffic flow display
+- Protocol-aware (HTTP, DNS, Kafka, etc.)
+- Accessible at `http://localhost:31235`
+
+### Observability Features
+
+#### Service Map
+
+Hubble UI automatically generates a service dependency graph:
+
+- **Nodes**: Kubernetes services, pods, and external endpoints
+- **Edges**: Network flows with protocol and status
+- **Filtering**: By namespace, labels, verdicts (allowed/denied)
+- **Real-time updates**: Live traffic visualization
+
+#### Flow Logs
+
+Hubble captures rich metadata for each network flow:
+
+```json
+{
+  "time": "2026-03-08T12:34:56.789Z",
+  "verdict": "FORWARDED",
+  "ethernet": { "source": "...", "destination": "..." },
+  "IP": { "source": "10.244.1.5", "destination": "10.244.2.7" },
+  "l4": { "TCP": { "source_port": 45678, "destination_port": 8080 } },
+  "l7": { "http": { "method": "GET", "url": "/api/users", "protocol": "HTTP/1.1" } },
+  "source": { "namespace": "microservices", "pod_name": "frontend-abc123" },
+  "destination": { "namespace": "microservices", "pod_name": "user-service-xyz789" },
+  "Summary": "TCP Flags: ACK, PSH"
+}
+```
+
+**Captured data:**
+- L3/L4: IP addresses, ports, protocols
+- L7: HTTP methods, URLs, gRPC methods, DNS queries
+- Identity: Pod names, namespaces, labels
+- Verdict: Allowed, denied, redirected
+- Timestamps: With microsecond precision
+
+### Using Hubble CLI
+
+The `hubble` CLI provides powerful flow inspection:
+
+```bash
+# Observe all flows in real-time
+hubble observe
+
+# Filter by namespace
+hubble observe -n microservices
+
+# Filter by pod
+hubble observe --from-pod frontend-abc123
+
+# Show only HTTP traffic
+hubble observe --protocol http
+
+# Show denied flows (network policy violations)
+hubble observe --verdict DROPPED
+
+# Show DNS queries
+hubble observe --protocol dns
+
+# Follow a specific pod's traffic
+hubble observe --follow --from-pod frontend-abc123
+```
+
+### Hubble UI Access
+
+Access the web interface at `http://localhost:31235` when running Cilium or Full mode.
+
+**Features:**
+- Interactive service map with zoom and pan
+- Flow table with filtering and search
+- Namespace selector for scoping view
+- Protocol breakdown and statistics
+- Export to JSON for analysis
+
+## Network Policies
+
+Cilium extends Kubernetes NetworkPolicy with additional capabilities:
+
+### Identity-Based Policies
+
+Unlike traditional IP-based policies, Cilium uses security identities:
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: microservices
+spec:
+  endpointSelector:
+    matchLabels:
+      app: backend
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+```
+
+**Benefits:**
+- Works across node boundaries
+- Survives pod rescheduling (IP changes)
+- More intuitive than CIDR-based rules
+- Scales to thousands of pods
+
+### L7 Protocol Policies
+
+Cilium can filter based on application-layer protocols:
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-only-get-requests
+spec:
+  endpointSelector:
+    matchLabels:
+      app: api-server
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: "GET"
+                path: "/api/.*"
+```
+
+**Supported protocols:**
+- HTTP/1.1 and HTTP/2
+- gRPC
+- Kafka
+- DNS
+- Cassandra
+
+### DNS-Based Policies
+
+Allow egress to external services by DNS name:
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-github-api
+spec:
+  endpointSelector:
+    matchLabels:
+      app: ci-runner
+  egress:
+    - toFQDNs:
+        - matchName: "api.github.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+```
+
+## eBPF Datapath
+
+Cilium's eBPF programs provide high-performance packet processing:
+
+### Datapath Components
+
+**tc (Traffic Control) BPF**:
+- Attached to network interfaces
+- Handles ingress/egress packet processing
+- Implements network policies and routing
+- Performs connection tracking
+
+**XDP (eXpress Data Path) BPF** (optional):
+- Processes packets before kernel stack
+- Used for DDoS mitigation and load balancing
+- Not enabled by default in this platform
+
+**Socket BPF**:
+- Intercepts socket operations (connect, bind, etc.)
+- Implements socket-level load balancing
+- Restricted to host namespace in this setup
+
+### Performance Benefits
+
+Compared to iptables-based networking:
+
+- **Lower latency**: No packet copying to userspace
+- **Higher throughput**: Kernel-level processing
+- **Better scalability**: O(1) rule lookup vs. O(n) iptables chains
+- **Less CPU overhead**: No context switches
+
+**Benchmarks (typical):**
+- 50% lower latency for small packets
+- 2-3x higher throughput for load balancing
+- 70% lower CPU usage for connection tracking
+
+## Integration with Istio
+
+Cilium and Istio complement each other:
+
+| Layer | Cilium | Istio |
+|-------|--------|-------|
+| L3/L4 | eBPF-based routing and policies | Transparent mTLS encryption |
+| L7 | Basic HTTP/gRPC filtering | Advanced traffic management (retries, circuit breaking) |
+| Observability | Network flows and DNS | Distributed tracing and metrics |
+| Security | Identity-based network policies | JWT authentication, authorization policies |
+
+### Traffic Flow with Both Enabled
+
+```
+Client Pod
+  ↓ (Cilium: routing + network policy)
+ztunnel (Istio L4 proxy)
+  ↓ (mTLS encryption)
+Network
+  ↓ (Cilium: routing + network policy)
+ztunnel (destination node)
+  ↓ (mTLS decryption)
+Waypoint Proxy (Istio L7 proxy)
+  ↓ (HTTP routing, retries, auth)
+Destination Pod
+```
+
+## Troubleshooting
+
+### Check Cilium Status
+
+```bash
+# Overall status
+cilium status
+
+# Detailed connectivity test
+cilium connectivity test
+
+# Check agent logs
+kubectl logs -n kube-system ds/cilium
+```
+
+### Diagnose Network Policy Issues
+
+```bash
+# List all policies
+kubectl get ciliumnetworkpolicies -A
+
+# Check policy verdicts in Hubble
+hubble observe --verdict DROPPED
+
+# Inspect specific policy
+kubectl describe ciliumnetworkpolicy <name> -n <namespace>
+```
+
+### Hubble Not Working
+
+```bash
+# Check Hubble relay status
+kubectl get pods -n kube-system -l k8s-app=hubble-relay
+
+# Test Hubble CLI connectivity
+hubble status
+
+# Port-forward Hubble UI manually
+kubectl port-forward -n kube-system svc/hubble-ui 12000:80
+```
+
+### CNI Plugin Issues
+
+```bash
+# Check CNI config
+kubectl exec -n kube-system ds/cilium -- cilium config view | grep -i cni
+
+# Verify CNI binary installation
+kubectl exec -n kube-system ds/cilium -- ls -la /host/opt/cni/bin/
+
+# Check CNI configuration file
+kubectl exec -n kube-system ds/cilium -- cat /host/etc/cni/net.d/05-cilium.conflist
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Service Mesh" icon="diagram-project" href="/architecture/service-mesh">
+    Learn how Istio adds L7 capabilities on top of Cilium
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/architecture/observability">
+    Explore the full observability stack beyond network flows
+  </Card>
+</CardGroup>

@@ -1,0 +1,105 @@
+---
+title: "Introduction"
+description: "Cloud-native microservices platform built on Kind with GitOps, service mesh, and complete observability stack"
+---
+
+# Welcome to Microservices Infrastructure
+
+A production-ready Kubernetes infrastructure stack designed for local development and testing of microservices applications. Built with modern cloud-native technologies and optimized for developer experience.
+
+## What is it?
+
+Microservices Infrastructure provides a complete Kubernetes platform running locally on Kind (Kubernetes in Docker), featuring:
+
+<CardGroup cols={2}>
+  <Card title="Multiple Bootstrap Modes" icon="bolt" href="/bootstrap/comparison">
+    Dev-fast (~120s), Cilium (~200s), or Full stack (~250s) with warm cluster support
+  </Card>
+  <Card title="Service Mesh" icon="network-wired" href="/architecture/service-mesh">
+    Istio ambient mode for advanced traffic management and security
+  </Card>
+  <Card title="Complete Observability" icon="chart-line" href="/architecture/observability">
+    Prometheus, Grafana, Loki, Tempo, and OpenTelemetry Collector
+  </Card>
+  <Card title="GitOps Ready" icon="code-branch" href="/architecture/gitops">
+    ArgoCD with ApplicationSet pattern for declarative deployments
+  </Card>
+</CardGroup>
+
+## Key Features
+
+- **Optimized Bootstrap** — Three bootstrap modes with intelligent caching and warm cluster support
+- **Advanced Networking** — Cilium CNI with Hubble UI for network visibility and eBPF-based security
+- **Service Mesh** — Istio ambient mode for zero-config service-to-service encryption
+- **Full Observability** — Metrics, logs, and traces with Prometheus, Grafana, Loki, and Tempo
+- **GitOps** — ArgoCD for declarative application deployment and synchronization
+- **Ingress** — Traefik with middleware for CORS, authentication, and rate limiting
+- **Object Storage** — Garage S3-compatible storage for log and trace backends
+- **Manifest Generation** — Nixidy (Nix + Kustomize) for type-safe Kubernetes manifests
+- **Cross-Platform** — Works on macOS (Intel/ARM), Linux (x86_64/aarch64), and WSL2
+
+## Architecture Stack
+
+| Layer | Component |
+|-------|-----------|
+| Kubernetes | Kind (local development) |
+| CNI | Cilium + Hubble UI |
+| Service Mesh | Istio (ambient mode) |
+| GitOps | ArgoCD + ApplicationSet |
+| Ingress | Traefik (CORS / auth / rate-limit middleware) |
+| Monitoring | Prometheus, Grafana, Loki, Tempo, OTel Collector |
+| Object Storage | Garage (Loki/Tempo backend) |
+| Database | PostgreSQL |
+| Manifest Generation | nixidy (Nix + Kustomize) |
+
+## Quick Start
+
+Get up and running in under 2 minutes:
+
+<Steps>
+  <Step title="Install Prerequisites">
+    Ensure you have Nix (with flakes), direnv, and Docker installed.
+  </Step>
+  <Step title="Clone and Enter">
+    ```bash
+    git clone https://github.com/hackz-megalo-cup/microservices-infra.git
+    cd microservices-infra
+    direnv allow
+    ```
+  </Step>
+  <Step title="Bootstrap the Cluster">
+    ```bash
+    bootstrap
+    ```
+    The dev-fast mode creates a single-node cluster in ~120s (cold start) or instantly (warm start).
+  </Step>
+</Steps>
+
+<Note>
+On the second run, the bootstrap command detects unchanged configurations and completes instantly via hash-based caching.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Prerequisites" icon="list-check" href="/prerequisites">
+    System requirements and tool installation
+  </Card>
+  <Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+    Detailed setup walkthrough
+  </Card>
+  <Card title="Bootstrap Modes" icon="sliders" href="/bootstrap/comparison">
+    Choose the right bootstrap mode
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Understand the platform architecture
+  </Card>
+</CardGroup>
+
+## Related Projects
+
+This repository provides the infrastructure foundation. For the application layer:
+
+- [microservices-app](https://github.com/hackz-megalo-cup/microservices-app) — Application code (Go / Node.js / React)
+
+Use `tilt up` or `docker compose up` in the app repository to deploy services onto this infrastructure.

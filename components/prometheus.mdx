@@ -1,0 +1,200 @@
+---
+title: Prometheus
+description: Metrics collection and time-series database
+---
+
+## Overview
+
+Prometheus collects and stores metrics from all components in the cluster, providing the foundation for monitoring and alerting. It's deployed as part of the `kube-prometheus-stack`.
+
+## Configuration
+
+### Nixidy Module (`nixidy/env/local/kube-prometheus-stack.nix`)
+
+```nix
+applications.kube-prometheus-stack = {
+  namespace = "observability";
+  createNamespace = true;
+  
+  helm.releases.kube-prometheus-stack = {
+    chart = charts.prometheus-community.kube-prometheus-stack;
+    values = {
+      prometheus = {
+        service = {
+          type = "NodePort";
+          nodePort = 30090;
+        };
+        prometheusSpec = {
+          replicas = 1;
+          retention = "24h";
+          enableRemoteWriteReceiver = true;
+          storageSpec = {
+            volumeClaimTemplate.spec = {
+              accessModes = ["ReadWriteOnce"];
+              resources.requests.storage = "5Gi";
+            };
+          };
+          serviceMonitorSelectorNilUsesHelmValues = false;
+          podMonitorSelectorNilUsesHelmValues = false;
+        };
+      };
+    };
+  };
+};
+```
+
+## Access
+
+- **URL**: http://localhost:30090
+- **Port**: 30090 (NodePort)
+
+## Storage
+
+### Data Retention
+
+- **Retention period**: 24 hours
+- **Storage size**: 5Gi persistent volume
+- **Access mode**: ReadWriteOnce
+
+### Remote Write Receiver
+
+Prometheus accepts remote write from:
+- **Tempo metrics generator** - RED metrics from traces
+- **External collectors** - Can push metrics via remote write API
+
+**Endpoint**: `http://kube-prometheus-stack-prometheus.observability:9090/api/v1/write`
+
+## Service Discovery
+
+Prometheus automatically discovers targets via:
+
+### ServiceMonitor
+
+Custom resources that define scrape targets:
+
+```yaml
+serviceMonitorSelectorNilUsesHelmValues: false
+podMonitorSelectorNilUsesHelmValues: false
+```
+
+With these set to `false`, Prometheus scrapes **all** ServiceMonitors in the cluster, not just those labeled by Helm.
+
+### Built-in Targets
+
+The kube-prometheus-stack includes ServiceMonitors for:
+
+- **Kubernetes components**: API server, kubelet, scheduler, controller-manager, etcd
+- **kube-state-metrics**: Cluster state metrics
+- **node-exporter**: Host-level metrics
+- **Prometheus itself**: Self-monitoring
+- **Alertmanager**: Alert metrics
+- **Grafana**: Dashboard metrics
+
+### Custom ServiceMonitors
+
+Components define their own ServiceMonitors:
+
+- **PostgreSQL**: `ServiceMonitor-postgresql.yaml`
+- **Application services**: Defined in microservice-app repo
+
+## Integration
+
+### Tempo Metrics Generator
+
+Tempo generates RED metrics (Rate, Errors, Duration) from traces and writes them to Prometheus:
+
+```yaml
+metricsGenerator:
+  enabled: true
+  remoteWriteUrl: http://kube-prometheus-stack-prometheus.observability:9090/api/v1/write
+```
+
+This provides span metrics without instrumenting applications.
+
+### Grafana Data Source
+
+Prometheus is configured as the default data source in Grafana:
+
+```yaml
+grafana:
+  additionalDataSources:
+    - name: Prometheus  # Default data source
+      type: prometheus
+      url: http://kube-prometheus-stack-prometheus.observability:9090
+      isDefault: true
+```
+
+## Prometheus Operator
+
+The stack includes Prometheus Operator, which manages:
+
+- **Prometheus** - Main time-series database
+- **Alertmanager** - Alert routing and silencing
+- **ServiceMonitor** - Scrape configuration as CRDs
+- **PodMonitor** - Pod-level scrape configuration
+- **PrometheusRule** - Recording and alerting rules
+
+### Custom Resource Definitions
+
+The operator installs these CRDs:
+
+- `prometheuses.monitoring.coreos.com`
+- `alertmanagers.monitoring.coreos.com`
+- `servicemonitors.monitoring.coreos.com`
+- `podmonitors.monitoring.coreos.com`
+- `prometheusrules.monitoring.coreos.com`
+- `thanosrulers.monitoring.coreos.com`
+- `scrapeconfigs.monitoring.coreos.com`
+- `probes.monitoring.coreos.com`
+- `alertmanagerconfigs.monitoring.coreos.com`
+
+## Alerting
+
+PrometheusRule resources define alerts:
+
+- **Node alerts**: CPU, memory, disk usage
+- **Kubernetes alerts**: Pod restarts, deployment issues
+- **Application alerts**: Service-specific thresholds
+
+Alerts are managed in `manifests/kube-prometheus-stack/PrometheusRule-*.yaml`.
+
+## Query Examples
+
+### Container CPU Usage
+
+```promql
+rate(container_cpu_usage_seconds_total[5m])
+```
+
+### Pod Memory Usage
+
+```promql
+container_memory_working_set_bytes{pod=~".*"}
+```
+
+### HTTP Request Rate
+
+```promql
+rate(http_requests_total[5m])
+```
+
+### Trace-derived RED Metrics
+
+```promql
+# From Tempo metrics generator
+traces_spanmetrics_latency_bucket
+traces_spanmetrics_calls_total
+```
+
+## Performance
+
+- **Single replica**: Suitable for local development
+- **In-memory + disk**: Recent data cached, older data on PV
+- **24h retention**: Keeps storage size manageable
+
+## Related Components
+
+- [Grafana](/components/grafana) - Visualization
+- [Alertmanager](#) - Alert routing (part of stack)
+- [Tempo](/components/tempo) - Metrics generator integration
+- [PostgreSQL](/components/postgresql) - ServiceMonitor example
