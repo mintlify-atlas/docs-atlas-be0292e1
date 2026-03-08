@@ -1,0 +1,123 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "Microservices Infrastructure",
+  "projectDescription": "Cloud-native microservices platform built on Kind with GitOps, service mesh, and complete observability stack",
+  "theme": "aspen",
+  "primaryColor": "#326ce5",
+  "lightColor": "#5b8def",
+  "darkColor": "#1e4ba1",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "prerequisites",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Bootstrap Modes",
+            "pages": [
+              "bootstrap/dev-fast",
+              "bootstrap/cilium-mode",
+              "bootstrap/full-mode",
+              "bootstrap/comparison"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/kubernetes",
+              "architecture/networking",
+              "architecture/service-mesh",
+              "architecture/observability",
+              "architecture/gitops"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/cluster-management",
+              "operations/manifest-generation",
+              "operations/secrets-management",
+              "operations/monitoring",
+              "operations/troubleshooting"
+            ]
+          },
+          {
+            "group": "Components",
+            "pages": [
+              "components/kind",
+              "components/cilium",
+              "components/istio",
+              "components/argocd",
+              "components/traefik",
+              "components/prometheus",
+              "components/grafana",
+              "components/loki",
+              "components/tempo",
+              "components/garage",
+              "components/postgresql"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/environment-setup",
+              "development/nixidy",
+              "development/dashboards",
+              "development/benchmarking"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI Reference",
+        "groups": [
+          {
+            "group": "Commands",
+            "pages": [
+              "cli/bootstrap",
+              "cli/cluster",
+              "cli/manifests",
+              "cli/monitoring",
+              "cli/utilities"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multiple bootstrap modes with warm cluster support and hash-based caching",
+    "Cilium CNI with Hubble UI for network visibility",
+    "Istio service mesh in ambient mode",
+    "ArgoCD GitOps with ApplicationSet pattern",
+    "Complete observability stack (Prometheus, Grafana, Loki, Tempo, OpenTelemetry)",
+    "Nixidy manifest generation with Nix + Kustomize",
+    "Cross-platform support (macOS Intel/ARM, Linux x86_64/aarch64, WSL2)",
+    "Traefik ingress with CORS, auth, and rate-limiting middleware",
+    "Garage S3-compatible object storage for logs and traces",
+    "Automated benchmarking and performance tracking"
+  ],
+  "publicApiSurface": [
+    "bootstrap - Dev-fast setup with kindnetd (single node, ~120s cold start)",
+    "bootstrap-full - Cilium mode setup (~200s cold start)",
+    "full-bootstrap - Full stack with Istio + ArgoCD (~250s cold start)",
+    "cluster-up / cluster-down - Create or destroy Kind cluster",
+    "cluster-stop / cluster-start - Stop or restart cluster with state preservation",
+    "gen-manifests - Regenerate Kubernetes manifests via nixidy",
+    "cilium-install - Install Cilium CNI + Hubble UI",
+    "istio-install - Install Istio ambient mode service mesh",
+    "argocd-bootstrap - Bootstrap ArgoCD on cluster",
+    "cloudflared-setup - Configure Cloudflare Tunnel + DNS",
+    "watch-manifests - Auto-apply manifest changes on file watch",
+    "benchmark - Run bootstrap performance benchmarks",
+    "debug-k8s - Debug Kubernetes pods and events"
+  ]
+}
